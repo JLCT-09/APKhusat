@@ -4,6 +4,10 @@ import '../../core/providers/auth_provider.dart';
 import '../../core/utils/storage_service.dart';
 import '../../data/device_service.dart';
 import '../../domain/models/device_model.dart' show DeviceModel, DeviceStatus;
+import '../../core/services/coordinate_service.dart';
+import '../../data/gps_service.dart';
+import '../widgets/device_coordinates_widget.dart';
+import 'ver_mas_screen.dart';
 
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
@@ -106,6 +110,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   void _onDeviceTap(DeviceModel device) {
     // Retornar el dispositivo seleccionado al MapScreen
+    // El MapScreen cambiará al tab Monitor y enfocará este dispositivo
     Navigator.of(context).pop(device);
   }
 
@@ -350,27 +355,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
                       ),
                     ),
                   const SizedBox(height: 8),
-                  // Última ubicación
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.location_on,
-                        size: 16,
-                        color: Colors.red,
-                      ),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          'Lat: ${device.latitude.toStringAsFixed(6)}, Lng: ${device.longitude.toStringAsFixed(6)}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey[700],
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
+                  // Última ubicación (con coordenadas válidas del historial si es necesario)
+                  DeviceCoordinatesWidget(device: device),
                   const SizedBox(height: 4),
                   // Velocidad actual
                   Row(

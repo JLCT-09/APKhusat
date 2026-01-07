@@ -21,20 +21,47 @@ dependencies:
   flutter_background_service: ^5.1.0
   intl: ^0.20.2
   shared_preferences: ^2.2.2
+  url_launcher: ^6.2.5
+  geocoding: ^3.0.0
+  custom_info_window: ^1.0.1
+  permission_handler: ^11.3.1
+  share_plus: ^10.1.2
+  image_picker: ^1.1.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
   flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.1
 
 flutter:
   uses-material-design: true
   assets:
     - assets/logo.empresa.png
+    - assets/images/logo.apk.jpg
+    - assets/images/logo.png
 
 flutter_launcher_icons:
   android: true
-  ios: true
-  image: assets/logo.empresa.png
+  ios: false
+  # Imagen principal para iconos legacy (debe ser cuadrada, mínimo 1024x1024)
+  image_path: "assets/images/logo.apk.jpg"
+  # Fondo del adaptive icon (color sólido blanco)
   adaptive_icon_background: "#FFFFFF"
+  # Foreground del adaptive icon
+  # ⚠️ IMPORTANTE: La imagen debe tener 40% de padding alrededor del logo
+  # Si el logo toca los bordes, Android lo estirará y se verá deformado
+  # El logo debe ocupar solo el 60% central de la imagen (20% padding en cada lado)
+  adaptive_icon_foreground: "assets/images/logo.apk.jpg"
+  remove_alpha_ios: true
+
+# Splash nativo desactivado - usando splash personalizado en Flutter
+# flutter_native_splash:
+#   color: "#FFFFFF"
+#   image: "assets/images/logo.png"
+#   android: true
+#   ios: false
+#   android_12:
+#     color: "#FFFFFF"
+#     image: "assets/images/logo.png"

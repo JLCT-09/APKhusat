@@ -21,6 +21,11 @@ class DeviceModel {
   final double longitude;
   final double speed; // km/h
   final DateTime lastUpdate; // Mapeado desde ultimaActualizacion
+  final double? voltaje; // Voltaje en V
+  final double? kilometraje; // Kilometraje en km
+  final int? bateria; // Porcentaje de batería (0-100)
+  final bool? estadoMotor; // true = Encendido, false = Apagado
+  final String? modelo; // Modelo del dispositivo (ej: FMB920)
 
   DeviceModel({
     required this.idDispositivo,
@@ -34,6 +39,11 @@ class DeviceModel {
     required this.longitude,
     required this.speed,
     required this.lastUpdate,
+    this.voltaje,
+    this.kilometraje,
+    this.bateria,
+    this.estadoMotor,
+    this.modelo,
   });
 
   /// Crea un DeviceModel desde un JSON del backend según schema de Swagger.
@@ -78,6 +88,11 @@ class DeviceModel {
       longitude: (json['longitud'] ?? json['longitude'] ?? 0.0).toDouble(),
       speed: (json['velocidad'] ?? json['speed'] ?? 0.0).toDouble(),
       lastUpdate: lastUpdate,
+      voltaje: json['voltaje'] != null ? (json['voltaje'] as num).toDouble() : null,
+      kilometraje: json['kilometraje'] != null ? (json['kilometraje'] as num).toDouble() : null,
+      bateria: json['bateria'] != null ? (json['bateria'] is int ? json['bateria'] as int : int.tryParse(json['bateria'].toString())) : null,
+      estadoMotor: json['estadoMotor'] != null ? (json['estadoMotor'] as bool) : null,
+      modelo: json['modelo']?.toString() ?? 'FMB920',
     );
   }
   

@@ -4,6 +4,7 @@ import 'package:location/location.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'dart:ui' as ui;
+import 'dart:ui' show ImageFilter;
 import 'dart:async';
 import 'dart:math' as math;
 import '../../domain/models/user.dart';
@@ -12,22 +13,41 @@ import '../../data/tracking_service.dart';
 import 'login_screen.dart';
 import 'devices_screen.dart' show DevicesScreen;
 import '../../domain/models/device_model.dart' show DeviceModel, DeviceStatus;
+import '../../domain/models/location_point.dart';
 import '../../data/gps_service.dart';
 import '../widgets/traffic_fab.dart';
 import '../widgets/center_location_fab.dart';
 import '../widgets/clear_map_fab.dart';
-import '../widgets/telemetry_bottom_sheet.dart';
+import '../widgets/vehicle_info_window.dart';
+import '../widgets/glass_action_bar.dart';
+import '../widgets/address_bar.dart';
+import '../widgets/historial_bottom_sheet.dart';
+import 'device_details_screen.dart';
+import 'ver_mas_screen.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:custom_info_window/custom_info_window.dart';
+import '../../data/roads_service.dart';
+import '../../core/services/alert_service.dart';
+import '../../core/services/share_service.dart';
+import '../../core/services/device_monitoring_service.dart';
+import '../../data/device_service.dart';
+import '../../core/utils/storage_service.dart';
+import '../../core/config/app_config.dart';
+import 'alerts_history_screen.dart';
+import 'profile_screen.dart';
 
 class MapScreen extends StatefulWidget {
   final UserRole userRole;
-  final DeviceModel? selectedDevice; // Vehículo seleccionado desde DevicesScreen
-  final bool centerOnDevice; // Si debe centrar en el vehículo seleccionado
+  final DeviceModel? selectedDevice;
+  final bool centerOnDevice;
+  final int? notificationDeviceId;
 
   const MapScreen({
     super.key,
     required this.userRole,
     this.selectedDevice,
     this.centerOnDevice = false,
+    this.notificationDeviceId,
   });
 
   @override
@@ -35,16 +55,22 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
+  // Controladores
   GoogleMapController? _mapController;
+  final CustomInfoWindowController _customInfoWindowController = CustomInfoWindowController();
   final Location _location = Location();
+  
+  // Estado del mapa
   LatLng? _currentPosition;
   int _currentIndex = 0;
   bool _trafficEnabled = false;
   bool _isFullScreen = false;
-
+  
+  // Servicios
   final TrackingService _trackingService = TrackingService();
   StreamSubscription<LocationData>? _locationSubscription;
   
+  // Polylines y marcadores
   final List<LatLng> _polylinePoints = [];
   final List<LatLng> _historialPoints = [];
   final List<List<LatLng>> _historialSegments = [];
@@ -54,138 +80,556 @@ class _MapScreenState extends State<MapScreen> {
   LatLng? _myLocation;
   LatLng? _lastTrackedPosition;
   
+  // Caché para puntos ajustados a carreteras
+  List<LatLng>? _cachedSnappedPoints;
+  bool _isProcessingSnap = false;
+  
+  // Variables para lógica de fallback al historial
+  bool _isUsingFallbackLocation = false;
+  List<GpsLocation> _recentHistory = [];
+  double _calculatedDistance = 0.0;
+  
+  // Monitoreo en tiempo real
   DeviceModel? _monitoredDevice;
   Timer? _monitoringTimer;
   bool _isMonitoringRealTime = false;
+  double _currentSpeed = 0.0;
+  bool _isShowingHistorial = false;
+  
+  // Selección de vehículo
+  DeviceModel? _selectedDevice;
+  LatLng? _selectedDevicePosition;
+  double _selectedDeviceSpeed = 0.0;
+  String _selectedDeviceStatus = 'Detenido';
+  bool _showInfoWindow = false;
+  bool _showActionBar = false;
+  
+  // Variables para reproducción de historial
+  bool _isPlayingHistorial = false;
+  double _playbackSpeed = 1.0;
+  int _currentPlaybackIndex = 0;
+  Timer? _playbackTimer;
+  List<GpsLocation> _playbackHistory = [];
+  DeviceModel? _playbackDevice;
+  
+  // Lista de dispositivos
+  List<DeviceModel> _devices = [];
+  bool _isLoadingDevices = false;
+  int? _pendingDeviceIdToFocus;
 
   @override
   void initState() {
     super.initState();
-    // Verificar permisos de ubicación de forma robusta antes de inicializar
     _checkLocationPermissions().then((tienePermisos) {
       if (tienePermisos) {
         _initializeLocation();
         _initializeTracking();
+        DeviceMonitoringService().startMonitoring();
         
-        // Si hay un vehículo seleccionado, centrar en él
-        if (widget.selectedDevice != null && widget.centerOnDevice) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _loadAllDevicesAndCreateMarkers();
+        });
+        
+        if (widget.notificationDeviceId != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            seleccionarVehiculoDesdeNotificacion(widget.notificationDeviceId!);
+          });
+        } else if (widget.selectedDevice != null && widget.centerOnDevice) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             _centerOnSelectedDevice();
           });
         }
       } else {
-        // Si no hay permisos, mostrar error y no cargar el mapa
         if (mounted) {
-          _showErrorDialog('Se requieren permisos de ubicación para usar el mapa. El punto azul no aparecerá sin permisos.');
+          _showErrorDialog('Se requieren permisos de ubicación para usar el mapa.');
         }
       }
     });
   }
-  
-  /// Verifica y solicita permisos de ubicación de forma robusta.
-  /// 
-  /// Este método es crítico para que el punto azul nativo de Google Maps aparezca.
-  /// Sin permisos explícitos, myLocationEnabled no funcionará correctamente.
-  /// 
-  /// Retorna true si los permisos fueron otorgados, false en caso contrario.
+
   Future<bool> _checkLocationPermissions() async {
-    // Paso 1: Verificar si el servicio de ubicación está habilitado
     bool servicioHabilitado = await _location.serviceEnabled();
-      if (!servicioHabilitado) {
-        servicioHabilitado = await _location.requestService();
-        if (!servicioHabilitado) {
-          return false;
-        }
-      }
+    if (!servicioHabilitado) {
+      servicioHabilitado = await _location.requestService();
+      if (!servicioHabilitado) return false;
+    }
 
     PermissionStatus estadoPermiso = await _location.hasPermission();
-    
     if (estadoPermiso == PermissionStatus.denied || estadoPermiso == PermissionStatus.deniedForever) {
       estadoPermiso = await _location.requestPermission();
-      
       if (estadoPermiso != PermissionStatus.granted && estadoPermiso != PermissionStatus.grantedLimited) {
         return false;
       }
     }
 
-    return estadoPermiso == PermissionStatus.granted || 
-           estadoPermiso == PermissionStatus.grantedLimited;
+    return estadoPermiso == PermissionStatus.granted || estadoPermiso == PermissionStatus.grantedLimited;
   }
-  
-  
-  /// Centra la cámara del mapa en el dispositivo seleccionado desde la lista de dispositivos.
-  /// 
-  /// Carga la última ubicación real desde el backend y crea un marcador de carro rojo.
-  /// También carga el historial GPS para mostrar el rastro.
-  Future<void> _centerOnSelectedDevice() async {
-    if (widget.selectedDevice != null && _mapController != null) {
-      try {
-        // Cargar última ubicación real desde el backend usando idDispositivo
-        final ultimaUbicacion = await GpsService.getUltimaUbicacion(widget.selectedDevice!.idDispositivo.toString());
-        
-        if (ultimaUbicacion != null) {
-          final devicePosition = ultimaUbicacion.toLatLng();
-          
-          // Centrar cámara en la ubicación real
-          _mapController!.animateCamera(
-            CameraUpdate.newLatLngZoom(devicePosition, 15.0),
-          );
-          
-          // Iniciar monitoreo en tiempo real del dispositivo seleccionado
-          _startRealTimeMonitoring(widget.selectedDevice!);
-          
-          // Agregar marcador inicial del vehículo seleccionado con icono de carro rojo
-          _createVehicleIcon().then((carIcon) {
-            setState(() {
-              _markers.clear(); // Limpiar marcadores anteriores
-              _markers.add(
-                Marker(
-                  markerId: const MarkerId('selected_vehicle'),
-                  position: devicePosition,
-                  icon: carIcon, // Usar icono de carro rojo
-                  onTap: () {
-                    // Mostrar BottomSheet con información del vehículo (incluye IMEI)
-                    _showVehicleInfoBottomSheet(
-                      devicePosition,
-                      ultimaUbicacion.speed ?? widget.selectedDevice!.speed,
-                      widget.selectedDevice!.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                      DateFormat('HH:mm:ss').format(ultimaUbicacion.timestamp),
-                      imei: widget.selectedDevice!.imei,
-                      device: widget.selectedDevice,
-                    );
-                  },
-                ),
-              );
-            });
-          });
-        } else {
-          // Si no hay última ubicación, usar las coordenadas del dispositivo
-          final devicePosition = LatLng(
-            widget.selectedDevice!.latitude,
-            widget.selectedDevice!.longitude,
-          );
-          _mapController!.animateCamera(
-            CameraUpdate.newLatLngZoom(devicePosition, 15.0),
-          );
+
+  Future<void> _fetchDevices() async {
+    if (_isLoadingDevices) return;
+    
+    setState(() {
+      _isLoadingDevices = true;
+    });
+
+    try {
+      final userId = await StorageService.getUserId() ?? '6';
+      final devices = await DeviceService.getDispositivosPorUsuario(userId);
+      
+      final deviceMap = <int, DeviceModel>{};
+      for (final device in devices) {
+        if (device.idDispositivo > 0) {
+          deviceMap[device.idDispositivo] = device;
         }
-      } catch (e) {
-        if (mounted) {
-          String mensajeError = 'Error de comunicación con Husat';
-          if (e.toString().contains('Código:')) {
-            mensajeError = e.toString().replaceFirst('Exception: ', '');
-          }
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(mensajeError),
-              backgroundColor: Colors.red,
-              duration: const Duration(seconds: 4),
-            ),
-          );
-        }
+      }
+      
+      final uniqueDevices = deviceMap.values.toList();
+      
+      if (mounted) {
+        setState(() {
+          _devices = uniqueDevices;
+          _isLoadingDevices = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error al cargar dispositivos: $e');
+      if (mounted) {
+        setState(() {
+          _isLoadingDevices = false;
+        });
       }
     }
   }
-  
+
+  Future<void> _loadAllDevicesAndCreateMarkers() async {
+    if (_devices.isEmpty) {
+      await _fetchDevices();
+    }
+
+    if (_mapController == null) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (_mapController == null || !mounted) return;
+    }
+
+    final carIcon = await _createVehicleIcon();
+    final newMarkers = <Marker>[];
+    
+    for (final device in _devices) {
+      try {
+        final ultimaUbicacion = await GpsService.getUltimaUbicacion(device.idDispositivo.toString());
+        
+        LatLng? devicePosition;
+        if (ultimaUbicacion != null && 
+            _isValidCoordinate(ultimaUbicacion.latitude, ultimaUbicacion.longitude)) {
+          devicePosition = ultimaUbicacion.toLatLng();
+        } else {
+          if (_isValidCoordinate(device.latitude, device.longitude)) {
+            devicePosition = LatLng(device.latitude, device.longitude);
+          }
+        }
+
+        if (devicePosition != null) {
+          newMarkers.add(
+            Marker(
+              markerId: MarkerId('device_${device.idDispositivo}'),
+              position: devicePosition,
+              icon: carIcon,
+              onTap: () {
+                final currentDevice = _devices.firstWhere(
+                  (d) => d.idDispositivo == device.idDispositivo,
+                  orElse: () => device,
+                );
+                
+                final speed = ultimaUbicacion?.speed ?? currentDevice.speed ?? 0.0;
+                final speedKmh = speed * 3.6;
+                final status = currentDevice.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+                _selectVehicle(currentDevice, devicePosition!, speedKmh, status, isFallback: false);
+              },
+            ),
+          );
+        }
+      } catch (e) {
+        debugPrint('Error al crear marcador para dispositivo ${device.idDispositivo}: $e');
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _markers.removeWhere((m) => m.markerId.value.startsWith('device_'));
+        _markers.addAll(newMarkers);
+      });
+    }
+  }
+
+  Future<void> seleccionarVehiculoDesdeNotificacion(int deviceId) async {
+    if (_mapController == null) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (_mapController == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Sincronizando ubicación del vehículo...'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (_devices.isEmpty || _isLoadingDevices) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Sincronizando ubicación del vehículo...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      await _fetchDevices();
+    }
+
+    DeviceModel? device;
+    try {
+      device = _devices.firstWhere((d) => d.idDispositivo == deviceId);
+    } catch (e) {
+      await _fetchDevices();
+      try {
+        device = _devices.firstWhere((d) => d.idDispositivo == deviceId);
+      } catch (e2) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Sincronizando ubicación del vehículo...'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    GpsLocation? ultimaUbicacion;
+    LatLng? devicePosition;
+    
+    try {
+      ultimaUbicacion = await GpsService.getUltimaUbicacion(device.idDispositivo.toString());
+      
+      if (ultimaUbicacion != null && 
+          _isValidCoordinate(ultimaUbicacion.latitude, ultimaUbicacion.longitude)) {
+        devicePosition = ultimaUbicacion.toLatLng();
+      } else {
+        final fallbackLocation = await _getLastValidLocationFromHistory(device.idDispositivo.toString());
+        if (fallbackLocation != null) {
+          devicePosition = fallbackLocation.toLatLng();
+        }
+      }
+    } catch (e) {
+      debugPrint('Error al obtener ubicación: $e');
+    }
+
+    if (devicePosition == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Sincronizando ubicación del vehículo...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    await _mapController!.animateCamera(
+      CameraUpdate.newLatLngZoom(devicePosition, 15.0),
+    );
+
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    if (device != null && devicePosition != null) {
+      final deviceFinal = device;
+      final positionFinal = devicePosition;
+      
+      await _createVehicleIcon().then((carIcon) {
+        if (mounted) {
+          setState(() {
+            _markers.removeWhere((m) => m.markerId.value == 'device_${deviceFinal.idDispositivo}');
+            
+            final currentDevice = _devices.firstWhere(
+              (d) => d.idDispositivo == deviceFinal.idDispositivo,
+              orElse: () => deviceFinal,
+            );
+            
+            _markers.add(
+              Marker(
+                markerId: MarkerId('device_${currentDevice.idDispositivo}'),
+                position: positionFinal,
+                icon: carIcon,
+                onTap: () {
+                  final speed = ultimaUbicacion?.speed ?? currentDevice.speed ?? 0.0;
+                  final speedKmh = speed * 3.6;
+                  final status = currentDevice.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+                  _selectVehicle(currentDevice, positionFinal, speedKmh, status, isFallback: false);
+                },
+              ),
+            );
+          });
+        }
+      });
+
+      if (mounted) {
+        final speed = ultimaUbicacion?.speed ?? deviceFinal.speed ?? 0.0;
+        final speedKmh = speed * 3.6;
+        final status = deviceFinal.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+        _selectVehicle(deviceFinal, positionFinal, speedKmh, status, isFallback: false);
+      }
+    }
+  }
+
+  Future<void> _focusDeviceById(int deviceId) async {
+    if (_mapController == null) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (_mapController == null || !mounted) return;
+    }
+
+    if (_devices.isEmpty) {
+      await _fetchDevices();
+    }
+
+    DeviceModel? device;
+    try {
+      device = _devices.firstWhere((d) => d.idDispositivo == deviceId);
+    } catch (e) {
+      await _fetchDevices();
+      try {
+        device = _devices.firstWhere((d) => d.idDispositivo == deviceId);
+      } catch (e2) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No se encontró el vehículo seleccionado'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    final ultimaUbicacion = await GpsService.getUltimaUbicacion(device.idDispositivo.toString());
+    
+    LatLng? devicePosition;
+    if (ultimaUbicacion != null && 
+        _isValidCoordinate(ultimaUbicacion.latitude, ultimaUbicacion.longitude)) {
+      devicePosition = ultimaUbicacion.toLatLng();
+    } else {
+      if (_isValidCoordinate(device.latitude, device.longitude)) {
+        devicePosition = LatLng(device.latitude, device.longitude);
+      }
+    }
+
+    if (devicePosition == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo obtener la ubicación del vehículo'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    DeviceModel currentDevice = device;
+    final currentDeviceId = device.idDispositivo;
+    if (currentDeviceId != null) {
+      try {
+        currentDevice = _devices.firstWhere(
+          (d) => d.idDispositivo == currentDeviceId,
+        );
+      } catch (e) {
+        // Usar el dispositivo pasado si no se encuentra
+      }
+    }
+
+    await _mapController!.animateCamera(
+      CameraUpdate.newLatLngZoom(devicePosition, 15.0),
+    );
+
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    await _createVehicleIcon().then((carIcon) {
+      if (mounted) {
+        setState(() {
+          _markers.removeWhere((m) => m.markerId.value == 'device_${currentDevice.idDispositivo}');
+          
+          _markers.add(
+            Marker(
+              markerId: MarkerId('device_${currentDevice.idDispositivo}'),
+              position: devicePosition!,
+              icon: carIcon,
+              onTap: () {
+                final speed = ultimaUbicacion?.speed ?? currentDevice.speed ?? 0.0;
+                final speedKmh = speed * 3.6;
+                final status = currentDevice.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+                _selectVehicle(currentDevice, devicePosition!, speedKmh, status, isFallback: false);
+              },
+            ),
+          );
+        });
+      }
+    });
+
+    if (mounted) {
+      final speed = ultimaUbicacion?.speed ?? currentDevice.speed ?? 0.0;
+      final speedKmh = speed * 3.6;
+      final status = currentDevice.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+      _selectVehicle(currentDevice, devicePosition!, speedKmh, status, isFallback: false);
+    }
+    
+    _pendingDeviceIdToFocus = null;
+  }
+
+  void _onMapCreated(GoogleMapController controller) {
+    _mapController = controller;
+    _customInfoWindowController.googleMapController = controller;
+    
+    if (AppConfig.targetVehicleId != null) {
+      final targetId = AppConfig.targetVehicleId;
+      AppConfig.targetVehicleId = null;
+      
+      if (targetId != null) {
+        Future.delayed(const Duration(milliseconds: 500), () async {
+          if (!mounted || _mapController == null) return;
+          await seleccionarVehiculoDesdeNotificacion(targetId);
+        });
+      }
+    } else if (_pendingDeviceIdToFocus != null) {
+      final deviceId = _pendingDeviceIdToFocus;
+      _pendingDeviceIdToFocus = null;
+      
+      final deviceIdToFocus = deviceId;
+      Future.delayed(const Duration(milliseconds: 500), () async {
+        if (!mounted || _mapController == null || deviceIdToFocus == null) return;
+        await _focusDeviceById(deviceIdToFocus);
+      });
+    }
+    
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (_currentPosition != null && _mapController != null && mounted) {
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(_currentPosition!, 16.0),
+        );
+      } else if (_myLocation != null && _mapController != null && mounted) {
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(_myLocation!, 16.0),
+        );
+      }
+    });
+  }
+
+  void _selectVehicle(DeviceModel device, LatLng position, double speed, String status, {bool isFallback = false, DateTime? historialTimestamp, double? historialSpeed}) {
+    DeviceModel deviceToUse = device;
+    try {
+      final updatedDevice = _devices.firstWhere(
+        (d) => d.idDispositivo == device.idDispositivo,
+      );
+      deviceToUse = updatedDevice;
+    } catch (e) {
+      debugPrint('Dispositivo ${device.idDispositivo} no encontrado en lista, usando el pasado');
+    }
+    
+    setState(() {
+      _selectedDevice = deviceToUse;
+      _selectedDevicePosition = position;
+      _selectedDeviceSpeed = historialSpeed ?? speed;
+      _selectedDeviceStatus = status;
+      _showInfoWindow = true;
+      _showActionBar = true;
+      _isUsingFallbackLocation = isFallback;
+    });
+    
+    _customInfoWindowController.addInfoWindow?.call(
+      VehicleInfoWindow(
+        device: deviceToUse,
+        lastUpdate: historialTimestamp ?? deviceToUse.lastUpdate,
+      ),
+      position,
+    );
+    
+    if (_mapController != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(position, 16.0),
+      );
+    }
+  }
+
+  void _openHistorialPicker(DeviceModel device) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => HistorialBottomSheet(
+        device: device,
+        onConfirm: (fechaDesde, fechaHasta, velocidadReproduccion) {
+          _playbackSpeed = velocidadReproduccion;
+          _playbackDevice = device;
+          _loadHistorial(device, fechaDesde, fechaHasta);
+        },
+      ),
+    );
+  }
+
+  void _onBottomNavTapped(int index) {
+    if (index == 0 && _currentIndex == 0) {
+      setState(() {
+        _isFullScreen = !_isFullScreen;
+      });
+      return;
+    }
+    
+    setState(() {
+      _currentIndex = index;
+      _isFullScreen = false;
+    });
+    
+    if (index == 1) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => const DevicesScreen(),
+        ),
+      ).then((result) async {
+        if (result != null && result is DeviceModel) {
+          final selectedDevice = result as DeviceModel;
+          
+          setState(() {
+            _currentIndex = 0;
+            _pendingDeviceIdToFocus = selectedDevice.idDispositivo;
+          });
+          
+          await _focusDeviceById(selectedDevice.idDispositivo);
+        }
+      });
+    }
+  }
+
+  void _clearSelection() {
+    _customInfoWindowController.hideInfoWindow?.call();
+    setState(() {
+      _selectedDevice = null;
+      _selectedDevicePosition = null;
+      _showInfoWindow = false;
+      _showActionBar = false;
+    });
+  }
+
+  void _centerCameraOnMyLocation() {
+    if (_currentPosition != null && _mapController != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(_currentPosition!, 16.0),
+      );
+    }
+  }
 
   Future<void> _initializeLocation() async {
     try {
@@ -209,7 +653,7 @@ class _MapScreenState extends State<MapScreen> {
         }
       }
     } catch (e) {
-      // Error silencioso: la ubicación se obtendrá del stream
+      // Error silencioso
     }
 
     _location.changeSettings(
@@ -226,72 +670,31 @@ class _MapScreenState extends State<MapScreen> {
             datosUbicacion.longitude!,
           );
           
-          final esPrimeraUbicacion = _currentPosition == null;
-          
-          double distancia = 0.0;
-          if (_lastTrackedPosition != null) {
-            distancia = _calculateDistance(
-              _lastTrackedPosition!.latitude,
-              _lastTrackedPosition!.longitude,
-              nuevaPosicion.latitude,
-              nuevaPosicion.longitude,
-            );
-          }
-          
           setState(() {
             _currentPosition = nuevaPosicion;
             _myLocation = nuevaPosicion;
             _lastUpdateTime = DateTime.now();
-            
-            if (widget.userRole == UserRole.client) {
-              _updateVehicleMarker(nuevaPosicion, datosUbicacion.speed);
-              
-              if (_lastTrackedPosition == null || distancia > 3.0) {
-                _polylinePoints.add(nuevaPosicion);
-                _lastTrackedPosition = nuevaPosicion;
-                _updatePolyline();
-              }
-            }
           });
-          
-          if (esPrimeraUbicacion && _mapController != null && widget.selectedDevice == null) {
-            _mapController!.animateCamera(
-              CameraUpdate.newLatLngZoom(nuevaPosicion, 16.0),
-            );
-          }
         }
       },
-      onError: (_) {
-        // Error silencioso: el stream se reconectará automáticamente
-      },
+      onError: (_) {},
     );
   }
 
-  /// Inicializa el servicio de rastreo GPS en segundo plano.
-  /// 
-  /// Configura callbacks para:
-  /// - Actualizaciones de ubicación en tiempo real
-  /// - Detección de paradas (30 segundos sin movimiento > 2m)
-  /// 
-  /// Solo inicia el rastreo si el usuario es cliente.
   Future<void> _initializeTracking() async {
-    // Inicializar notificaciones
     await _trackingService.initializeNotifications();
 
-    // Configurar callbacks
     _trackingService.onLocationUpdate = (LocationPoint location) {
       if (mounted) {
-        // Actualizar posición actual
         final newLocation = LatLng(location.latitude, location.longitude);
         _currentPosition = newLocation;
-        _lastUpdateTime = DateTime.now(); // Actualizar hora del último reporte
-        _currentSpeed = location.speed; // Velocidad en m/s
+        _lastUpdateTime = DateTime.now();
+        _currentSpeed = location.speed ?? 0.0;
         
         _polylinePoints.add(newLocation);
         
         setState(() {
-          _updateVehicleMarker(newLocation, location.speed);
-          _updatePolyline();
+          // Actualizar polyline
         });
       }
     };
@@ -302,7 +705,6 @@ class _MapScreenState extends State<MapScreen> {
       }
     };
 
-    // Iniciar rastreo si es cliente
     if (widget.userRole == UserRole.client) {
       final started = await _trackingService.startTracking();
       if (!started && mounted) {
@@ -311,132 +713,574 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Calcula la distancia entre dos puntos geográficos usando la fórmula de Haversine.
-  /// 
-  /// Esta fórmula es precisa para distancias cortas y medias en la superficie terrestre.
-  /// Retorna la distancia en metros.
-  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
-    const double radioTierra = 6371000; // Radio de la Tierra en metros
-    final double diferenciaLat = _toRadians(lat2 - lat1);
-    final double diferenciaLon = _toRadians(lon2 - lon1);
-    
-    final double a = math.sin(diferenciaLat / 2) * math.sin(diferenciaLat / 2) +
-        math.cos(_toRadians(lat1)) * math.cos(_toRadians(lat2)) *
-        math.sin(diferenciaLon / 2) * math.sin(diferenciaLon / 2);
-    final double c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
-    
-    return radioTierra * c;
+  bool _isValidCoordinate(double? lat, double? lng) {
+    if (lat == null || lng == null) return false;
+    if (lat == 0.0 && lng == 0.0) return false;
+    if (lat.abs() < 0.0001 && lng.abs() < 0.0001) return false;
+    return true;
   }
 
-  /// Convierte grados a radianes.
-  double _toRadians(double grados) {
-    return grados * (math.pi / 180.0);
-  }
-
-  /// Actualiza la polyline (línea roja) que muestra el rastro del vehículo.
-  /// 
-  /// Solo se muestra para clientes y si hay más de un punto en el rastro.
-  /// La línea es roja (identidad HusatGps) con 70% de opacidad y 7px de ancho.
-  /// Actualiza las polylines (líneas) que muestran el rastro del vehículo.
-  /// 
-  /// - Ruta de hoy (roja): Se muestra cuando está en monitoreo en tiempo real
-  /// - Ruta histórica (azul): Se muestra cuando se carga historial
-  /// Ambas pueden mostrarse simultáneamente para comparación.
-  /// Filtra y segmenta puntos para evitar saltos irrealistas.
-  /// 
-  /// Si la distancia entre dos puntos es mayor a 500 metros, se considera un error de señal
-  /// y se crea un segmento separado (discontinuo) para no atravesar la ciudad de forma irreal.
-  /// 
-  /// Retorna una lista de segmentos, donde cada segmento es una lista de puntos continuos.
-  List<List<LatLng>> _filterLargeJumps(List<LatLng> points, List<DateTime>? timestamps) {
-    if (points.length < 2) return [points];
-    
-    final segments = <List<LatLng>>[];
-    final currentSegment = <LatLng>[points.first];
-    const double maxDistanceMeters = 500.0; // Distancia máxima para considerar continuidad
-    
-    for (int i = 1; i < points.length; i++) {
-      final prev = points[i - 1];
-      final current = points[i];
-      
-      // Calcular distancia en metros
-      final distance = _calculateDistance(
-        prev.latitude, prev.longitude,
-        current.latitude, current.longitude,
+  Future<GpsLocation?> _getLastValidLocationFromHistory(String dispositivoId) async {
+    try {
+      final fechaDesde = DateTime.now().subtract(const Duration(hours: 24));
+      final historial = await GpsService.getHistorial(
+        dispositivoId,
+        fechaDesde: fechaDesde,
+        fechaHasta: DateTime.now(),
       );
       
-      // Si hay timestamps, verificar también el tiempo transcurrido
-      bool isLargeJump = distance > maxDistanceMeters;
-      if (timestamps != null && i < timestamps.length) {
-        final timeDiff = timestamps[i].difference(timestamps[i - 1]);
-        // Si hay más de 500m en menos de 2 segundos, es un error de señal
-        if (distance > maxDistanceMeters && timeDiff.inSeconds < 2) {
-          isLargeJump = true;
+      for (var ubicacion in historial.reversed) {
+        if (_isValidCoordinate(ubicacion.latitude, ubicacion.longitude)) {
+          return ubicacion;
         }
       }
       
-      if (isLargeJump) {
-        // Guardar el segmento actual y empezar uno nuevo
-        if (currentSegment.length > 1) {
-          segments.add(List.from(currentSegment));
+      return null;
+    } catch (e) {
+      debugPrint('Error obteniendo historial para fallback: $e');
+      return null;
+    }
+  }
+
+  Future<void> _centerOnSelectedDevice() async {
+    if (widget.selectedDevice != null && _mapController != null) {
+      try {
+        final ultimaUbicacion = await GpsService.getUltimaUbicacion(widget.selectedDevice!.idDispositivo.toString());
+        
+        GpsLocation? locationToUse = ultimaUbicacion;
+        bool usingFallback = false;
+        
+        if (ultimaUbicacion == null || 
+            !_isValidCoordinate(ultimaUbicacion.latitude, ultimaUbicacion.longitude)) {
+          final fallbackLocation = await _getLastValidLocationFromHistory(widget.selectedDevice!.idDispositivo.toString());
+          if (fallbackLocation != null) {
+            locationToUse = fallbackLocation;
+            usingFallback = true;
+          }
         }
-        currentSegment.clear();
-        currentSegment.add(current);
+        
+        if (locationToUse != null) {
+          final devicePosition = locationToUse.toLatLng();
+          
+          _mapController!.animateCamera(
+            CameraUpdate.newLatLngZoom(devicePosition, 15.0),
+          );
+          
+          _startRealTimeMonitoring(widget.selectedDevice!);
+          
+          _createVehicleIcon().then((carIcon) {
+            setState(() {
+              _markers.clear();
+              _markers.add(
+                Marker(
+                  markerId: const MarkerId('selected_vehicle'),
+                  position: devicePosition,
+                  icon: carIcon,
+                  onTap: () {
+                    final status = widget.selectedDevice!.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+                    final speed = locationToUse?.speed ?? widget.selectedDevice!.speed ?? 0.0;
+                    _selectVehicle(widget.selectedDevice!, devicePosition, speed, status, isFallback: usingFallback);
+                  },
+                ),
+              );
+            });
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error: ${e.toString()}'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  void _startRealTimeMonitoring(DeviceModel device) {
+    _stopRealTimeMonitoring();
+    
+    setState(() {
+      _monitoredDevice = device;
+      _isMonitoringRealTime = true;
+      _isShowingHistorial = false;
+      _historialPoints.clear();
+      _historialSegments.clear();
+      _polylinePoints.clear();
+      _recentHistory.clear();
+      _calculatedDistance = 0.0;
+      _isUsingFallbackLocation = false;
+    });
+    
+    _updateDeviceLocation(device);
+    
+    _monitoringTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      if (mounted && _isMonitoringRealTime && _monitoredDevice != null) {
+        _updateDeviceLocation(_monitoredDevice!);
       } else {
-        currentSegment.add(current);
+        timer.cancel();
       }
-    }
-    
-    // Agregar el último segmento
-    if (currentSegment.length > 1) {
-      segments.add(currentSegment);
-    }
-    
-    return segments.isEmpty ? [points] : segments;
+    });
   }
-  
-  /// Interpola puntos intermedios para saltos grandes entre ubicaciones
-  /// 
-  /// Si la distancia entre dos puntos es mayor a 100 metros, añade puntos intermedios
-  /// para que la línea siga mejor las calles en lugar de atravesar edificios.
-  List<LatLng> _interpolatePoints(List<LatLng> points) {
-    if (points.length < 2) return points;
-    
-    final interpolated = <LatLng>[points.first];
-    const double maxDistanceMeters = 100.0; // Distancia máxima sin interpolar
-    
-    for (int i = 1; i < points.length; i++) {
-      final prev = points[i - 1];
-      final current = points[i];
+
+  void _stopRealTimeMonitoring() {
+    _monitoringTimer?.cancel();
+    _monitoringTimer = null;
+    _isMonitoringRealTime = false;
+  }
+
+  Future<void> _updateDeviceLocation(DeviceModel device) async {
+    try {
+      final ultimaUbicacion = await GpsService.getUltimaUbicacion(device.idDispositivo.toString());
       
-      // Calcular distancia en metros usando fórmula de Haversine
-      final distance = _calculateDistance(
-        prev.latitude, prev.longitude,
-        current.latitude, current.longitude,
-      );
+      GpsLocation? locationToUse = ultimaUbicacion;
+      bool usingFallback = false;
       
-      if (distance > maxDistanceMeters) {
-        // Interpolar: añadir puntos intermedios
-        final numSteps = (distance / maxDistanceMeters).ceil();
-        for (int step = 1; step < numSteps; step++) {
-          final ratio = step / numSteps;
-          final interpolatedLat = prev.latitude + (current.latitude - prev.latitude) * ratio;
-          final interpolatedLng = prev.longitude + (current.longitude - prev.longitude) * ratio;
-          interpolated.add(LatLng(interpolatedLat, interpolatedLng));
+      if (ultimaUbicacion == null || 
+          !_isValidCoordinate(ultimaUbicacion.latitude, ultimaUbicacion.longitude)) {
+        final fallbackLocation = await _getLastValidLocationFromHistory(device.idDispositivo.toString());
+        if (fallbackLocation != null) {
+          locationToUse = fallbackLocation;
+          usingFallback = true;
+        } else {
+          return;
         }
       }
       
-      interpolated.add(current);
+      if (locationToUse != null && mounted) {
+        final newPosition = locationToUse.toLatLng();
+        
+        final speedMs = locationToUse.speed ?? 0.0;
+        final speedKmh = speedMs * 3.6;
+        await AlertService().checkSpeedAlert(device, speedKmh);
+        await AlertService().checkCoverageAlert(device, locationToUse.timestamp);
+        
+        double distancia = 0.0;
+        if (_lastTrackedPosition != null) {
+          distancia = _calculateDistance(
+            _lastTrackedPosition!.latitude,
+            _lastTrackedPosition!.longitude,
+            newPosition.latitude,
+            newPosition.longitude,
+          );
+        }
+        
+        if (_lastTrackedPosition == null || distancia > 3.0) {
+          _createVehicleIcon().then((carIcon) {
+            if (mounted) {
+              setState(() {
+                _markers.removeWhere((marker) => marker.markerId.value == 'selected_vehicle');
+                _markers.add(
+                  Marker(
+                    markerId: const MarkerId('selected_vehicle'),
+                    position: newPosition,
+                    icon: carIcon,
+                    onTap: () {
+                      final status = device.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+                      final speed = locationToUse?.speed ?? device.speed ?? 0.0;
+                      _selectVehicle(device, newPosition, speed, status, isFallback: usingFallback);
+                    },
+                  ),
+                );
+                
+                if (!usingFallback) {
+                  _polylinePoints.add(newPosition);
+                  _lastTrackedPosition = newPosition;
+                }
+              });
+            }
+          });
+        }
+      }
+    } catch (e) {
+      // Error silencioso
     }
-    
-    return interpolated;
   }
-  
+
+  Future<void> _loadHistorial(DeviceModel device, DateTime fechaDesde, DateTime fechaHasta) async {
+    _stopRealTimeMonitoring();
+    _stopPlayback();
+    
+    setState(() {
+      _isShowingHistorial = true;
+      _isPlayingHistorial = false;
+      _currentPlaybackIndex = 0;
+      _historialPoints.clear();
+      _historialSegments.clear();
+      _polylinePoints.clear();
+      _polylines.clear();
+    });
+    
+    try {
+      final historial = await GpsService.getHistorial(
+        device.idDispositivo.toString(),
+        fechaDesde: fechaDesde,
+        fechaHasta: fechaHasta,
+      );
+      
+      if (historial.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No se encontraron recorridos en este horario'),
+              backgroundColor: Colors.orange,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        return;
+      }
+      
+      _playbackHistory = historial;
+      
+      if (historial.isNotEmpty && mounted) {
+        final primeraUbicacion = historial.first;
+        final ultimaUbicacionHistorial = historial.last;
+        final primeraPosicion = primeraUbicacion.toLatLng();
+        final ultimaPosicion = ultimaUbicacionHistorial.toLatLng();
+        
+        setState(() {
+          final historialPoints = <LatLng>[];
+          final historialTimestamps = <DateTime>[];
+          
+          LatLng? lastPoint;
+          for (var ubicacion in historial) {
+            final currentPoint = ubicacion.toLatLng();
+            
+            if (lastPoint == null || 
+                (currentPoint.latitude != lastPoint.latitude || 
+                 currentPoint.longitude != lastPoint.longitude)) {
+              historialPoints.add(currentPoint);
+              historialTimestamps.add(ubicacion.timestamp);
+              lastPoint = currentPoint;
+            }
+          }
+          
+          if (historialPoints.length < 2) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('No hay suficientes puntos de recorrido en este periodo'),
+                  backgroundColor: Colors.orange,
+                  duration: Duration(seconds: 3),
+                ),
+              );
+            }
+            return;
+          }
+          
+          final segments = _filterLargeJumps(historialPoints, historialTimestamps);
+          
+          _historialSegments.clear();
+          _historialPoints.clear();
+          
+          for (var segment in segments) {
+            if (segment.length > 1) {
+              final smoothedSegment = _interpolatePoints(segment);
+              _historialSegments.add(smoothedSegment);
+              _historialPoints.addAll(smoothedSegment);
+            }
+          }
+          
+          _updateHistorialPolyline();
+        });
+        
+        Future.wait([
+          _createStartIcon(),
+          _createEndIcon(),
+          _createVehicleIcon(),
+        ]).then((icons) {
+          if (mounted) {
+            final startIcon = icons[0] as BitmapDescriptor;
+            final endIcon = icons[1] as BitmapDescriptor;
+            final vehicleIcon = icons[2] as BitmapDescriptor;
+            
+            setState(() {
+              _markers.removeWhere((marker) => 
+                marker.markerId.value == 'selected_vehicle' ||
+                marker.markerId.value == 'historial_start' ||
+                marker.markerId.value == 'historial_end'
+              );
+              
+              _markers.add(
+                Marker(
+                  markerId: const MarkerId('historial_start'),
+                  position: primeraPosicion,
+                  icon: startIcon,
+                  infoWindow: InfoWindow(
+                    title: 'Inicio del Recorrido',
+                    snippet: DateFormat('dd/MM/yyyy HH:mm').format(primeraUbicacion.timestamp),
+                  ),
+                ),
+              );
+              
+              _markers.add(
+                Marker(
+                  markerId: const MarkerId('historial_end'),
+                  position: ultimaPosicion,
+                  icon: endIcon,
+                  infoWindow: InfoWindow(
+                    title: 'Fin del Recorrido',
+                    snippet: DateFormat('dd/MM/yyyy HH:mm').format(ultimaUbicacionHistorial.timestamp),
+                  ),
+                ),
+              );
+              
+              _markers.add(
+                Marker(
+                  markerId: const MarkerId('selected_vehicle'),
+                  position: ultimaPosicion,
+                  icon: vehicleIcon,
+                  onTap: () {
+                    final status = device.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido';
+                    final speed = ultimaUbicacionHistorial.speed ?? device.speed;
+                    _selectVehicle(
+                      device, 
+                      ultimaPosicion, 
+                      speed, 
+                      status, 
+                      isFallback: false,
+                      historialTimestamp: ultimaUbicacionHistorial.timestamp,
+                      historialSpeed: ultimaUbicacionHistorial.speed,
+                    );
+                  },
+                ),
+              );
+            });
+            
+            if (_historialPoints.isNotEmpty && _mapController != null) {
+              _fitBoundsToHistorial();
+            }
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint('Error al cargar historial: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error al cargar el historial'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  void _startPlayback() {
+    if (_playbackHistory.isEmpty || _playbackDevice == null) return;
+    
+    setState(() {
+      _isPlayingHistorial = true;
+      _currentPlaybackIndex = 0;
+    });
+    
+    final baseInterval = Duration(milliseconds: (1000 / _playbackSpeed).round());
+    
+    _playbackTimer = Timer.periodic(baseInterval, (timer) {
+      if (_currentPlaybackIndex >= _playbackHistory.length) {
+        _stopPlayback();
+        return;
+      }
+      
+      final location = _playbackHistory[_currentPlaybackIndex];
+      final position = location.toLatLng();
+      
+      _createVehicleIcon().then((carIcon) {
+        if (mounted) {
+          setState(() {
+            _markers.removeWhere((m) => m.markerId.value == 'playback_vehicle');
+            
+            _markers.add(
+              Marker(
+                markerId: const MarkerId('playback_vehicle'),
+                position: position,
+                icon: carIcon,
+              ),
+            );
+            
+            if (_mapController != null) {
+              _mapController!.animateCamera(
+                CameraUpdate.newLatLng(position),
+              );
+            }
+          });
+        }
+      });
+      
+      _currentPlaybackIndex++;
+    });
+  }
+
+  void _stopPlayback() {
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    
+    setState(() {
+      _isPlayingHistorial = false;
+    });
+  }
+
+  void _showMoreOptions(BuildContext context, DeviceModel device) {
+    if (_selectedDevice == null || _selectedDevicePosition == null) return;
+    
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => VerMasScreen(
+          device: device,
+          latitude: _selectedDevicePosition!.latitude,
+          longitude: _selectedDevicePosition!.longitude,
+          speedKmh: _selectedDeviceSpeed,
+          status: _selectedDeviceStatus,
+          onSeguimiento: () {
+            if (_selectedDevice != null) {
+              _startRealTimeMonitoring(_selectedDevice!);
+            }
+          },
+          onHistorial: () {
+            if (_selectedDevice != null) {
+              _openHistorialPicker(_selectedDevice!);
+            }
+          },
+          onComando: () {
+            if (_selectedDevice != null) {
+              _showCommandDialog(context, _selectedDevice!);
+            }
+          },
+        ),
+      ),
+    );
+  }
+
+  void _showCommandDialog(BuildContext context, DeviceModel device) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text(
+          'Comandos del Vehículo',
+          style: TextStyle(color: Colors.red),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Seleccione un comando para el vehículo:'),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _sendMotorCommand(device, 'apagar');
+              },
+              icon: const Icon(Icons.power_off, color: Colors.white),
+              label: const Text('Apagar Motor'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 50),
+              ),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _sendMotorCommand(device, 'restaurar');
+              },
+              icon: const Icon(Icons.power_settings_new, color: Colors.white),
+              label: const Text('Restaurar Motor'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 50),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _sendMotorCommand(DeviceModel device, String command) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Enviando comando de ${command == 'apagar' ? 'corte' : 'restauración'}...'),
+        backgroundColor: Colors.orange,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+    
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Comando ${command == 'apagar' ? 'de corte' : 'de restauración'} enviado'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    });
+  }
+
+  Future<void> _openNavigation(double latitude, double longitude) async {
+    final url = Uri.parse('https://www.google.com/maps/dir/?api=1&destination=$latitude,$longitude');
+    
+    try {
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No se pudo abrir Google Maps'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al abrir navegación: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void _clearMarkersAndRoute() {
+    _customInfoWindowController.hideInfoWindow?.call();
+    _stopRealTimeMonitoring();
+    
+    setState(() {
+      _selectedDevice = null;
+      _selectedDevicePosition = null;
+      _selectedDeviceSpeed = 0.0;
+      _selectedDeviceStatus = 'Detenido';
+      _showInfoWindow = false;
+      _showActionBar = false;
+      
+      _markers.clear();
+      _polylinePoints.clear();
+      _historialPoints.clear();
+      _historialSegments.clear();
+      _monitoredDevice = null;
+      _cachedSnappedPoints = null;
+      RoadsService.clearCache();
+      _updatePolyline();
+    });
+  }
+
   void _updatePolyline() {
     _polylines.clear();
     
     if (_polylinePoints.length > 1) {
-      final smoothedPoints = _interpolatePoints(_polylinePoints);
+      final pointsToUse = _cachedSnappedPoints ?? _polylinePoints;
+      final smoothedPoints = _interpolatePoints(pointsToUse);
       _polylines.add(
         Polyline(
           polylineId: const PolylineId('route_today'),
@@ -452,6 +1296,14 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
     
+    _updateHistorialPolyline();
+  }
+
+  void _updateHistorialPolyline() {
+    _polylines.removeWhere((polyline) => 
+      polyline.polylineId.value.startsWith('route_history')
+    );
+    
     if (_historialSegments.isNotEmpty) {
       for (int i = 0; i < _historialSegments.length; i++) {
         final segment = _historialSegments[i];
@@ -461,7 +1313,7 @@ class _MapScreenState extends State<MapScreen> {
             Polyline(
               polylineId: PolylineId('route_history_segment_$i'),
               points: smoothedPoints,
-              color: Colors.blue.withOpacity(0.7),
+              color: Colors.red.withOpacity(0.7),
               width: 5,
               geodesic: true,
               jointType: JointType.round,
@@ -475,13 +1327,126 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Crea un icono verde circular para el marcador de inicio del recorrido.
+  List<List<LatLng>> _filterLargeJumps(List<LatLng> points, List<DateTime>? timestamps) {
+    if (points.length < 2) return [points];
+    
+    final segments = <List<LatLng>>[];
+    final currentSegment = <LatLng>[points.first];
+    const double maxDistanceMeters = 500.0;
+    
+    for (int i = 1; i < points.length; i++) {
+      final prev = points[i - 1];
+      final current = points[i];
+      
+      final distance = _calculateDistance(
+        prev.latitude, prev.longitude,
+        current.latitude, current.longitude,
+      );
+      
+      bool isLargeJump = distance > maxDistanceMeters;
+      if (timestamps != null && i < timestamps.length) {
+        final timeDiff = timestamps[i].difference(timestamps[i - 1]);
+        if (distance > maxDistanceMeters && timeDiff.inSeconds < 2) {
+          isLargeJump = true;
+        }
+      }
+      
+      if (isLargeJump) {
+        if (currentSegment.length > 1) {
+          segments.add(List.from(currentSegment));
+        }
+        currentSegment.clear();
+        currentSegment.add(current);
+      } else {
+        currentSegment.add(current);
+      }
+    }
+    
+    if (currentSegment.length > 1) {
+      segments.add(currentSegment);
+    }
+    
+    return segments.isEmpty ? [points] : segments;
+  }
+
+  List<LatLng> _interpolatePoints(List<LatLng> points) {
+    if (points.length < 2) return points;
+    
+    final interpolated = <LatLng>[points.first];
+    const double maxDistanceMeters = 100.0;
+    
+    for (int i = 1; i < points.length; i++) {
+      final prev = points[i - 1];
+      final current = points[i];
+      
+      final distance = _calculateDistance(
+        prev.latitude, prev.longitude,
+        current.latitude, current.longitude,
+      );
+      
+      if (distance > maxDistanceMeters) {
+        final numSteps = (distance / maxDistanceMeters).ceil();
+        for (int step = 1; step < numSteps; step++) {
+          final ratio = step / numSteps;
+          final interpolatedLat = prev.latitude + (current.latitude - prev.latitude) * ratio;
+          final interpolatedLng = prev.longitude + (current.longitude - prev.longitude) * ratio;
+          interpolated.add(LatLng(interpolatedLat, interpolatedLng));
+        }
+      }
+      
+      interpolated.add(current);
+    }
+    
+    return interpolated;
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    const double radioTierra = 6371000;
+    final double diferenciaLat = _toRadians(lat2 - lat1);
+    final double diferenciaLon = _toRadians(lon2 - lon1);
+    
+    final double a = math.sin(diferenciaLat / 2) * math.sin(diferenciaLat / 2) +
+        math.cos(_toRadians(lat1)) * math.cos(_toRadians(lat2)) *
+        math.sin(diferenciaLon / 2) * math.sin(diferenciaLon / 2);
+    final double c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+    
+    return radioTierra * c;
+  }
+
+  double _toRadians(double grados) {
+    return grados * (math.pi / 180.0);
+  }
+
+  void _fitBoundsToHistorial() {
+    if (_mapController == null || _historialPoints.isEmpty) return;
+    
+    double minLat = _historialPoints.first.latitude;
+    double maxLat = _historialPoints.first.latitude;
+    double minLng = _historialPoints.first.longitude;
+    double maxLng = _historialPoints.first.longitude;
+    
+    for (var point in _historialPoints) {
+      minLat = math.min(minLat, point.latitude);
+      maxLat = math.max(maxLat, point.latitude);
+      minLng = math.min(minLng, point.longitude);
+      maxLng = math.max(maxLng, point.longitude);
+    }
+    
+    final bounds = LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+    
+    _mapController!.animateCamera(
+      CameraUpdate.newLatLngBounds(bounds, 50.0),
+    );
+  }
+
   Future<BitmapDescriptor> _createStartIcon() async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     const size = Size(60, 60);
     
-    // Fondo circular verde
     final paint = Paint()
       ..color = Colors.green
       ..style = PaintingStyle.fill;
@@ -491,7 +1456,6 @@ class _MapScreenState extends State<MapScreen> {
       paint,
     );
     
-    // Borde blanco
     final borderPaint = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.stroke
@@ -502,7 +1466,6 @@ class _MapScreenState extends State<MapScreen> {
       borderPaint,
     );
     
-    // Icono de play/inicio
     final iconPaint = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.fill;
@@ -520,14 +1483,12 @@ class _MapScreenState extends State<MapScreen> {
     
     return BitmapDescriptor.fromBytes(uint8List);
   }
-  
-  /// Crea un icono de banderín (checkered flag) para el marcador de fin del recorrido.
+
   Future<BitmapDescriptor> _createEndIcon() async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     const size = Size(60, 60);
     
-    // Fondo circular rojo
     final paint = Paint()
       ..color = Colors.red
       ..style = PaintingStyle.fill;
@@ -537,7 +1498,6 @@ class _MapScreenState extends State<MapScreen> {
       paint,
     );
     
-    // Borde blanco
     final borderPaint = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.stroke
@@ -548,7 +1508,6 @@ class _MapScreenState extends State<MapScreen> {
       borderPaint,
     );
     
-    // Dibujar banderín (triángulo)
     final flagPaint = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.fill;
@@ -559,7 +1518,6 @@ class _MapScreenState extends State<MapScreen> {
     flagPath.close();
     canvas.drawPath(flagPath, flagPaint);
     
-    // Poste del banderín
     final polePaint = Paint()
       ..color = Colors.brown
       ..style = PaintingStyle.fill
@@ -577,17 +1535,12 @@ class _MapScreenState extends State<MapScreen> {
     
     return BitmapDescriptor.fromBytes(uint8List);
   }
-  
-  /// Crea un icono personalizado de carro rojo para los marcadores de vehículos.
-  /// 
-  /// Los vehículos de terceros (flota) se muestran con este icono rojo,
-  /// diferenciándose del punto azul nativo de Google Maps que muestra mi ubicación.
+
   Future<BitmapDescriptor> _createVehicleIcon() async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     const size = Size(80, 80);
     
-    // Fondo circular rojo
     final paint = Paint()
       ..color = Colors.red
       ..style = PaintingStyle.fill;
@@ -597,19 +1550,16 @@ class _MapScreenState extends State<MapScreen> {
       paint,
     );
     
-    // Dibujar icono de carro (directions_car simplificado)
     final iconPaint = Paint()
       ..color = Colors.white
       ..style = PaintingStyle.fill;
     
-    // Cuerpo del carro (rectángulo redondeado)
     final carBody = RRect.fromRectAndRadius(
       Rect.fromLTWH(size.width * 0.15, size.height * 0.35, size.width * 0.7, size.height * 0.35),
       const Radius.circular(6),
     );
     canvas.drawRRect(carBody, iconPaint);
     
-    // Ventanas del carro
     final windowPaint = Paint()
       ..color = Colors.red.withOpacity(0.3)
       ..style = PaintingStyle.fill;
@@ -636,206 +1586,6 @@ class _MapScreenState extends State<MapScreen> {
     return BitmapDescriptor.fromBytes(uint8List);
   }
 
-  /// Actualiza el marcador del vehículo en tiempo real con telemetría.
-  /// 
-  /// Crea un marcador con icono de carro rojo que muestra:
-  /// - Posición actual del vehículo
-  /// - Velocidad convertida de m/s a km/h
-  /// - Estado (En Movimiento / Detenido)
-  /// 
-  /// Al presionar el marcador, se muestra un BottomSheet con información detallada.
-  void _updateVehicleMarker(LatLng position, double? speedInMs) async {
-    // Convertir velocidad de m/s a km/h
-    final speedKmh = (speedInMs ?? 0.0) * 3.6;
-    
-    // Determinar estado según velocidad
-    final isMoving = speedKmh >= 1.0;
-    final statusText = isMoving ? 'En Movimiento' : 'Detenido';
-    
-    // Formatear hora con DateFormat
-    final timeString = _lastUpdateTime != null
-        ? DateFormat('HH:mm:ss').format(_lastUpdateTime!)
-        : DateFormat('HH:mm:ss').format(DateTime.now());
-    
-    // Crear icono de carro rojo
-    final carIcon = await _createVehicleIcon();
-    
-    // Limpiar marcadores de vehículos (pero mantener el vehículo seleccionado si existe)
-    _markers.removeWhere((marker) => marker.markerId.value == 'vehicle_marker');
-    
-    // Solo agregar marcador de carro rojo si es cliente (mi ubicación se muestra con punto azul nativo de Google)
-    if (widget.userRole == UserRole.client) {
-      _markers.add(
-        Marker(
-          markerId: const MarkerId('vehicle_marker'),
-          position: position,
-          icon: carIcon,
-          onTap: () {
-            // Mostrar BottomSheet con información vertical
-            _showVehicleInfoBottomSheet(position, speedKmh, statusText, timeString, imei: null);
-          },
-        ),
-      );
-    }
-    
-    // Si hay un vehículo seleccionado desde la lista de Dispositivos, cargar ubicación real
-    if (widget.selectedDevice != null) {
-      // Cargar última ubicación real de forma asíncrona usando idDispositivo
-      GpsService.getUltimaUbicacion(widget.selectedDevice!.idDispositivo.toString()).then((ultimaUbicacion) {
-        if (ultimaUbicacion != null && mounted) {
-          final devicePosition = ultimaUbicacion.toLatLng();
-          setState(() {
-            _markers.removeWhere((marker) => marker.markerId.value == 'selected_vehicle');
-            _markers.add(
-              Marker(
-                markerId: const MarkerId('selected_vehicle'),
-                position: devicePosition,
-                icon: carIcon, // Usar el mismo icono de carro rojo
-                onTap: () {
-                  // Mostrar BottomSheet con información del vehículo seleccionado
-                    _showVehicleInfoBottomSheet(
-                      devicePosition,
-                      ultimaUbicacion.speed ?? widget.selectedDevice!.speed,
-                      widget.selectedDevice!.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                      DateFormat('HH:mm:ss').format(ultimaUbicacion.timestamp),
-                      imei: widget.selectedDevice!.imei,
-                      device: widget.selectedDevice,
-                    );
-                },
-              ),
-            );
-          });
-        } else if (mounted) {
-          // Si no hay última ubicación, usar las coordenadas del dispositivo
-          final devicePosition = LatLng(
-            widget.selectedDevice!.latitude,
-            widget.selectedDevice!.longitude,
-          );
-          setState(() {
-            _markers.removeWhere((marker) => marker.markerId.value == 'selected_vehicle');
-            _markers.add(
-              Marker(
-                markerId: const MarkerId('selected_vehicle'),
-                position: devicePosition,
-                icon: carIcon,
-                onTap: () {
-                  _showVehicleInfoBottomSheet(
-                    devicePosition,
-                    widget.selectedDevice!.speed,
-                    widget.selectedDevice!.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                    DateFormat('HH:mm:ss').format(widget.selectedDevice!.lastUpdate),
-                    imei: widget.selectedDevice!.imei,
-                    device: widget.selectedDevice,
-                  );
-                },
-              ),
-            );
-          });
-        }
-      }).catchError((_) {
-        // Error silencioso
-      });
-    }
-  }
-  
-  /// Muestra un BottomSheet con información detallada del vehículo.
-  /// 
-  /// Usa el widget modular TelemetryBottomSheet para mostrar:
-  /// - Estado (En Movimiento / Detenido)
-  /// - Velocidad en km/h
-  /// - Latitud y Longitud con 6 decimales
-  /// - Hora de última actualización
-  /// - IMEI del dispositivo para confirmar identidad
-  /// - Botón para ver historial de recorrido
-  void _showVehicleInfoBottomSheet(
-    LatLng position,
-    double speedKmh,
-    String status,
-    String time, {
-    String? imei,
-    DeviceModel? device,
-  }) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => TelemetryBottomSheet(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        speedKmh: speedKmh,
-        status: status,
-        time: time,
-        imei: imei,
-        device: device ?? _monitoredDevice,
-        onLoadHistorial: device != null || _monitoredDevice != null
-            ? (device, fechaDesde, fechaHasta) {
-                _loadHistorial(device, fechaDesde, fechaHasta);
-              }
-            : null,
-      ),
-    );
-  }
-
-  /// Callback que se ejecuta cuando el mapa de Google Maps se crea.
-  /// 
-  /// Guarda la referencia del controlador y centra automáticamente
-  /// la cámara en la ubicación actual del usuario con zoom 16.
-  void _onMapCreated(GoogleMapController controller) {
-    _mapController = controller;
-    
-    // Centrar automáticamente en la ubicación real del usuario con zoom 16
-    // Esperar un momento para asegurar que los permisos estén activos
-    Future.delayed(const Duration(milliseconds: 300), () {
-      if (_currentPosition != null && _mapController != null && mounted) {
-        _mapController!.animateCamera(
-          CameraUpdate.newLatLngZoom(
-            _currentPosition!,
-            16.0,
-          ),
-        );
-      } else if (_myLocation != null && _mapController != null && mounted) {
-        // Si _currentPosition es null pero _myLocation tiene valor, usar ese
-        _mapController!.animateCamera(
-          CameraUpdate.newLatLngZoom(
-            _myLocation!,
-            16.0,
-          ),
-        );
-      }
-    });
-  }
-
-  /// Centra la cámara del mapa en la ubicación actual del usuario.
-  /// 
-  /// Se ejecuta al presionar el botón de centrado (mira telescópica).
-  /// Usa zoom 16 para mostrar la calle actual.
-  void _centerCameraOnMyLocation() {
-    if (_currentPosition != null && _mapController != null) {
-      _mapController!.animateCamera(
-        CameraUpdate.newLatLngZoom(
-          _currentPosition!,
-          16.0,
-        ),
-      );
-    }
-  }
-
-  /// Obtiene el conjunto de marcadores actuales del mapa.
-  /// 
-  /// Incluye:
-  /// - Marcador del vehículo propio (carro rojo) si es cliente
-  /// - Marcador del vehículo seleccionado desde la lista de dispositivos
-  /// 
-  /// El punto azul nativo de Google Maps se maneja por separado con myLocationEnabled.
-  Set<Marker> _getMarkers() {
-    return _markers;
-  }
-
-  /// Muestra un diálogo de error con el mensaje proporcionado.
-  /// 
-  /// Usa el estilo de HusatGps (rojo) y permite al usuario cerrarlo.
   void _showErrorDialog(String message) {
     showDialog(
       context: context,
@@ -858,9 +1608,6 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  /// Muestra un diálogo cuando se detecta que el vehículo está detenido.
-  /// 
-  /// Se activa cuando el vehículo no se ha movido más de 2 metros durante 30 segundos.
   void _showStopDialog() {
     showDialog(
       context: context,
@@ -896,230 +1643,42 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  /// Maneja la navegación entre las diferentes pestañas del BottomNavigationBar.
-  /// 
-  /// Índices:
-  /// - 0: Monitor (mapa principal)
-  /// - 1: Dispositivos (lista de vehículos)
-  /// - 2: Alerta (placeholder)
-  /// - 3: Yo (perfil del usuario)
-  /// 
-  /// Si se presiona Monitor dos veces, alterna el modo pantalla completa.
-  void _onBottomNavTapped(int index) {
-    // Si presiona Monitor (index 0) cuando ya está en Monitor, alternar pantalla completa
-    if (index == 0 && _currentIndex == 0) {
-      setState(() {
-        _isFullScreen = !_isFullScreen;
-      });
-      return;
-    }
-    
-    setState(() {
-      _currentIndex = index;
-      _isFullScreen = false; // Salir de pantalla completa al cambiar de pestaña
-    });
-    
-    // Navegación según el índice
-    if (index == 1) { // Dispositivos
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (context) => const DevicesScreen(),
-        ),
-      ).then((result) async {
-        // Si se seleccionó un dispositivo, volver al Monitor y cargar ubicación real
-        if (result != null && result is DeviceModel) {
-          setState(() {
-            _currentIndex = 0; // Volver a Monitor
-          });
-          
-          try {
-            // Cargar última ubicación real desde el backend usando idDispositivo
-            final ultimaUbicacion = await GpsService.getUltimaUbicacion(result.idDispositivo.toString());
-            
-            if (ultimaUbicacion != null) {
-              final devicePosition = ultimaUbicacion.toLatLng();
-              
-              // Centrar en el dispositivo seleccionado
-              if (_mapController != null) {
-                _mapController!.animateCamera(
-                  CameraUpdate.newLatLngZoom(devicePosition, 15.0),
-                );
-              }
-              
-              // Iniciar monitoreo en tiempo real del dispositivo seleccionado
-              _startRealTimeMonitoring(result);
-              
-              // Agregar marcador inicial del vehículo seleccionado con icono de carro rojo
-              _createVehicleIcon().then((carIcon) {
-                setState(() {
-                  _markers.clear(); // Limpiar todos los marcadores para ver solo un vehículo a la vez
-                  _markers.add(
-                    Marker(
-                      markerId: const MarkerId('selected_vehicle'),
-                      position: devicePosition,
-                      icon: carIcon, // Usar icono de carro rojo
-                      onTap: () {
-                        // Mostrar BottomSheet con información del vehículo (incluye IMEI)
-                        _showVehicleInfoBottomSheet(
-                          devicePosition,
-                          ultimaUbicacion.speed ?? result.speed,
-                          result.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                          DateFormat('HH:mm:ss').format(ultimaUbicacion.timestamp),
-                          imei: result.imei,
-                          device: result,
-                        );
-                      },
-                    ),
-                  );
-                });
-              });
-            } else {
-              // Si no hay última ubicación, usar las coordenadas del dispositivo
-              final devicePosition = LatLng(result.latitude, result.longitude);
-              if (_mapController != null) {
-                _mapController!.animateCamera(
-                  CameraUpdate.newLatLngZoom(devicePosition, 15.0),
-                );
-              }
-            }
-          } catch (e) {
-            if (mounted) {
-              String mensajeError = 'Error de comunicación con Husat';
-              if (e.toString().contains('Código:')) {
-                mensajeError = e.toString().replaceFirst('Exception: ', '');
-              }
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(mensajeError),
-                  backgroundColor: Colors.red,
-                  duration: const Duration(seconds: 4),
-                ),
-              );
-            }
-          }
-        }
-      });
-    }
+  Set<Marker> _getMarkers() {
+    return _markers;
   }
 
-  /// Construye la vista de perfil del usuario.
-  /// 
-  /// Muestra:
-  /// - Avatar circular con inicial del nombre
-  /// - Nombre completo
-  /// - Correo electrónico
-  /// - Botón para cerrar sesión
-  Widget _buildProfileView() {
-    final user = Provider.of<AuthProvider>(context).user;
-
-    // Eliminar Scaffold y AppBar extra - solo retornar el contenido
-    return SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            children: [
-              const SizedBox(height: 40),
-              // Avatar circular
-              CircleAvatar(
-                radius: 60,
-                backgroundColor: Colors.red,
-                child: Text(
-                  user?.nombre.substring(0, 1).toUpperCase() ?? 'U',
-                  style: const TextStyle(
-                    fontSize: 48,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              // Nombre del usuario
-              Text(
-                user?.nombre ?? 'Usuario',
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
-                ),
-              ),
-              const SizedBox(height: 8),
-              // Correo electrónico
-              Text(
-                user?.email ?? '',
-                style: const TextStyle(
-                  fontSize: 16,
-                  color: Colors.grey,
-                ),
-              ),
-              const SizedBox(height: 40),
-              // Botón de cerrar sesión
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () async {
-                    // Detener rastreo antes de cerrar sesión
-                    await _trackingService.stopTracking();
-                    
-                    final authProvider = Provider.of<AuthProvider>(context, listen: false);
-                    await authProvider.logout();
-                    if (context.mounted) {
-                      Navigator.of(context).pushAndRemoveUntil(
-                      MaterialPageRoute(
-                        builder: (context) => LoginScreen(),
-                      ),
-                        (route) => false,
-                      );
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: const Text(
-                    'Cerrar Sesión',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-  }
-
-  /// Construye la vista principal del mapa con Google Maps.
-  /// 
-  /// Incluye:
-  /// - Mapa de Google Maps con punto azul nativo
-  /// - Marcadores de vehículos (carros rojos)
-  /// - Polyline roja del rastro (solo para clientes)
-  /// - Botones flotantes: Tráfico, Centrar, Limpiar
-  /// - Botón X para salir de pantalla completa
   Widget _buildMapView() {
     return Stack(
       children: [
         GoogleMap(
           onMapCreated: _onMapCreated,
+          onTap: (LatLng position) {
+            _clearSelection();
+            _customInfoWindowController.hideInfoWindow?.call();
+          },
+          onCameraMove: (CameraPosition position) {
+            if (_showInfoWindow && _selectedDevicePosition != null) {
+              _customInfoWindowController.onCameraMove?.call();
+            }
+          },
           initialCameraPosition: CameraPosition(
-            target: _currentPosition ?? const LatLng(-8.1116, -79.0288), // Trujillo como fallback
+            target: _currentPosition ?? const LatLng(-8.1116, -79.0288),
             zoom: 16.0,
           ),
-          myLocationEnabled: true, // CRÍTICO: Activar punto azul nativo de Google (requiere permisos)
-          myLocationButtonEnabled: false, // Ya tenemos nuestro botón de centrado
-          padding: const EdgeInsets.only(top: 100), // Evitar que el logo de Google tape el punto azul
+          myLocationEnabled: true,
+          myLocationButtonEnabled: false,
+          padding: const EdgeInsets.only(top: 100),
           markers: _getMarkers(),
-          polylines: _polylines, // Mostrar polylines siempre (hoy e historial)
+          polylines: _polylines,
           mapType: MapType.normal,
-          trafficEnabled: _trafficEnabled, // Capa de tráfico
+          trafficEnabled: _trafficEnabled,
         ),
-        // Botón X para salir de pantalla completa
+        CustomInfoWindow(
+          controller: _customInfoWindowController,
+          height: 200,
+          width: 280,
+          offset: 50,
+        ),
         if (_isFullScreen)
           Positioned(
             top: 40,
@@ -1140,7 +1699,6 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
-        // Botones flotantes: Tráfico y Centrar
         if (!_isFullScreen)
           Positioned(
             bottom: 100,
@@ -1148,7 +1706,6 @@ class _MapScreenState extends State<MapScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Botón de tráfico (widget modular)
                 TrafficFab(
                   trafficEnabled: _trafficEnabled,
                   onPressed: () {
@@ -1158,47 +1715,43 @@ class _MapScreenState extends State<MapScreen> {
                   },
                 ),
                 const SizedBox(height: 12),
-                // Botón para centrar cámara (widget modular)
                 CenterLocationFab(
                   onPressed: _centerCameraOnMyLocation,
                 ),
                 const SizedBox(height: 12),
-                // Botón de limpiar marcadores (widget modular)
-                ClearMapFab(
-                  onPressed: _clearMarkersAndRoute,
-                ),
+                if (_markers.isNotEmpty)
+                  ClearMapFab(
+                    onPressed: _clearMarkersAndRoute,
+                  ),
+                if (_isShowingHistorial && _playbackHistory.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: FloatingActionButton(
+                      onPressed: () {
+                        if (_isPlayingHistorial) {
+                          _stopPlayback();
+                        } else {
+                          _startPlayback();
+                        }
+                      },
+                      backgroundColor: Colors.red,
+                      heroTag: 'playback_control',
+                      mini: true,
+                      child: Icon(
+                        _isPlayingHistorial ? Icons.pause : Icons.play_arrow,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
       ],
     );
   }
-  
-  /// Limpia todos los marcadores y el rastro del mapa.
-  /// 
-  /// Útil para evitar saturación visual cuando hay muchos vehículos.
-  /// Elimina:
-  /// - Todos los marcadores de vehículos (carros rojos)
-  /// - Todos los puntos del rastro de hoy (polyline roja)
-  /// - Todos los puntos del historial (polyline azul)
-  /// 
-  /// También detiene el monitoreo en tiempo real.
-  /// El punto azul nativo de Google Maps no se elimina (se maneja por separado).
-  void _clearMarkersAndRoute() {
-    _stopRealTimeMonitoring(); // Detener monitoreo en tiempo real
-    setState(() {
-      _markers.clear(); // Limpiar todos los carros rojos
-      _polylinePoints.clear(); // Limpiar el rastro de hoy (roja)
-      _historialPoints.clear(); // Limpiar el historial (azul)
-      _historialSegments.clear(); // Limpiar segmentos del historial
-      _monitoredDevice = null; // Limpiar dispositivo monitoreado
-      _updatePolyline(); // Actualizar la polyline vacía
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
-    // Mostrar pantalla de carga mientras se obtiene la ubicación
     if (_currentPosition == null) {
       return Scaffold(
         appBar: AppBar(
@@ -1207,7 +1760,7 @@ class _MapScreenState extends State<MapScreen> {
           foregroundColor: Colors.white,
         ),
         body: Container(
-          color: Colors.red, // Pantalla roja de HusatGps
+          color: Colors.red,
           child: const Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -1216,8 +1769,8 @@ class _MapScreenState extends State<MapScreen> {
                   valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                   strokeWidth: 4,
                 ),
-                const SizedBox(height: 24),
-                const Text(
+                SizedBox(height: 24),
+                Text(
                   'Localizando vehículo...',
                   style: TextStyle(
                     color: Colors.white,
@@ -1232,38 +1785,24 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
-    // Mostrar vista según el índice seleccionado
     Widget currentView;
     switch (_currentIndex) {
-      case 0: // Monitor
+      case 0:
         currentView = _buildMapView();
         break;
-      case 1: // Dispositivos - Se maneja en _onBottomNavTapped
-        currentView = _buildMapView(); // Temporal, se navegará
+      case 1:
+        currentView = _buildMapView();
         break;
-      case 2: // Alerta
-        currentView = Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.notifications_active, size: 64, color: Colors.red),
-              const SizedBox(height: 16),
-              const Text(
-                'Alertas',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-        );
+      case 2:
+        currentView = AlertsHistoryScreen(userRole: widget.userRole);
         break;
-      case 3: // Yo (Perfil)
-        currentView = _buildProfileView();
+      case 3:
+        currentView = const ProfileScreen();
         break;
       default:
         currentView = _buildMapView();
     }
 
-    // Si está en pantalla completa, mostrar solo el mapa sin AppBar ni BottomNav
     if (_isFullScreen && _currentIndex == 0) {
       return Scaffold(
         body: currentView,
@@ -1276,358 +1815,140 @@ class _MapScreenState extends State<MapScreen> {
         backgroundColor: Colors.red,
         foregroundColor: Colors.white,
       ),
-      body: currentView,
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        type: BottomNavigationBarType.fixed,
-        onTap: _onBottomNavTapped,
-        selectedItemColor: Colors.red, // Color rojo corporativo para estado activo
-        unselectedItemColor: Colors.grey,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.public),
-            label: 'Monitor',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.devices),
-            label: 'Dispositivos',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.notifications_active),
-            label: 'Alerta',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.person),
-            label: 'Yo',
-          ),
+      body: Stack(
+        children: [
+          currentView,
         ],
+      ),
+      bottomNavigationBar: SafeArea(
+        bottom: true,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 10,
+                offset: const Offset(0, -2),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_currentIndex == 0 && _showActionBar && _selectedDevice != null && _selectedDevicePosition != null)
+                Flexible(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AddressBar(
+                        latitude: _selectedDevicePosition!.latitude,
+                        longitude: _selectedDevicePosition!.longitude,
+                      ),
+                      Container(
+                        height: 0.5,
+                        color: Colors.white.withOpacity(0.2),
+                      ),
+                      GlassActionBar(
+                        onDetalle: () {
+                          if (_selectedDevice != null && _selectedDevicePosition != null) {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) => DeviceDetailsScreen(
+                                  device: _selectedDevice!,
+                                  latitude: _selectedDevicePosition!.latitude,
+                                  longitude: _selectedDevicePosition!.longitude,
+                                  speedKmh: _selectedDeviceSpeed,
+                                  status: _selectedDeviceStatus,
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                        onSeguimiento: () {
+                          if (_selectedDevice != null) {
+                            _startRealTimeMonitoring(_selectedDevice!);
+                          }
+                        },
+                        onHistorial: () {
+                          if (_selectedDevice != null) {
+                            _openHistorialPicker(_selectedDevice!);
+                          }
+                        },
+                        onComando: () {
+                          if (_selectedDevice != null) {
+                            _showCommandDialog(context, _selectedDevice!);
+                          }
+                        },
+                        onCompartir: () {
+                          if (_selectedDevice != null && _selectedDevicePosition != null) {
+                            ShareService().shareLocation(
+                              placa: _selectedDevice!.placa ?? 'Sin Placa',
+                              latitude: _selectedDevicePosition!.latitude,
+                              longitude: _selectedDevicePosition!.longitude,
+                            );
+                          }
+                        },
+                        onVerMas: () {
+                          if (_selectedDevice != null) {
+                            _showMoreOptions(context, _selectedDevice!);
+                          }
+                        },
+                      ),
+                      Divider(
+                        height: 1,
+                        thickness: 0.5,
+                        color: Colors.white.withOpacity(0.2),
+                      ),
+                    ],
+                  ),
+                ),
+              BottomNavigationBar(
+                currentIndex: _currentIndex,
+                type: BottomNavigationBarType.fixed,
+                onTap: _onBottomNavTapped,
+                selectedItemColor: Colors.red,
+                unselectedItemColor: Colors.grey,
+                backgroundColor: Colors.white,
+                elevation: 0,
+                items: const [
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.public),
+                    label: 'Monitor',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.devices),
+                    label: 'Dispositivos',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.notifications_active),
+                    label: 'Alerta',
+                  ),
+                  BottomNavigationBarItem(
+                    icon: Icon(Icons.person),
+                    label: 'Yo',
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 
   @override
   void dispose() {
-    // Cancelar timer de monitoreo estrictamente antes de cualquier otra operación
+    _stopPlayback();
     _monitoringTimer?.cancel();
     _monitoringTimer = null;
-    
-    // Cancelar suscripción de ubicación
+    DeviceMonitoringService().stopMonitoring();
     _locationSubscription?.cancel();
     _locationSubscription = null;
-    
-    // Detener servicio de rastreo
     _trackingService.stopTracking();
-    
-    // Liberar controlador del mapa
+    _customInfoWindowController.dispose();
     _mapController?.dispose();
     _mapController = null;
-    
     super.dispose();
   }
-  
-  /// Inicia el monitoreo en tiempo real del dispositivo seleccionado.
-  /// 
-  /// Usa Timer.periodic de 10 segundos para llamar a GET /api/gps/ultima-ubicacion/{dispositivoId}
-  /// Mueve el marcador del carro rojo y añade la nueva posición a la Polyline roja.
-  /// Solo añade puntos si el carro se movió más de 3 metros.
-  void _startRealTimeMonitoring(DeviceModel device) {
-    // Detener monitoreo anterior si existe
-    _stopRealTimeMonitoring();
-    
-    setState(() {
-      _monitoredDevice = device;
-      _isMonitoringRealTime = true;
-      _isShowingHistorial = false;
-      _historialPoints.clear(); // Limpiar historial al iniciar monitoreo en tiempo real
-      _historialSegments.clear(); // Limpiar segmentos del historial
-      _polylinePoints.clear(); // Limpiar ruta de hoy
-    });
-    
-    // Cargar ubicación inicial
-    _updateDeviceLocation(device);
-    
-    // Iniciar timer de 10 segundos
-    _monitoringTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
-      if (mounted && _isMonitoringRealTime && _monitoredDevice != null) {
-        _updateDeviceLocation(_monitoredDevice!);
-      } else {
-        timer.cancel();
-      }
-    });
-    
-  }
-  
-  void _stopRealTimeMonitoring() {
-    _monitoringTimer?.cancel();
-    _monitoringTimer = null;
-    _isMonitoringRealTime = false;
-  }
-  
-  /// Actualiza la ubicación del dispositivo desde el servidor
-  Future<void> _updateDeviceLocation(DeviceModel device) async {
-    try {
-      final ultimaUbicacion = await GpsService.getUltimaUbicacion(device.idDispositivo.toString());
-      
-      if (ultimaUbicacion != null && mounted) {
-        final newPosition = ultimaUbicacion.toLatLng();
-        
-        // Calcular distancia desde la última posición
-        double distancia = 0.0;
-        if (_lastTrackedPosition != null) {
-          distancia = _calculateDistance(
-            _lastTrackedPosition!.latitude,
-            _lastTrackedPosition!.longitude,
-            newPosition.latitude,
-            newPosition.longitude,
-          );
-        }
-        
-        // Solo añadir punto si se movió más de 3 metros
-        if (_lastTrackedPosition == null || distancia > 3.0) {
-          // Actualizar marcador del vehículo
-          _createVehicleIcon().then((carIcon) {
-            if (mounted) {
-              setState(() {
-                _markers.removeWhere((marker) => marker.markerId.value == 'selected_vehicle');
-                _markers.add(
-                  Marker(
-                    markerId: const MarkerId('selected_vehicle'),
-                    position: newPosition,
-                    icon: carIcon,
-                    onTap: () {
-                      _showVehicleInfoBottomSheet(
-                        newPosition,
-                        ultimaUbicacion.speed ?? device.speed,
-                        device.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                        DateFormat('HH:mm:ss').format(ultimaUbicacion.timestamp),
-                        imei: device.imei,
-                        device: device,
-                      );
-                    },
-                  ),
-                );
-                
-                // Añadir punto a la polyline de hoy (roja)
-                _polylinePoints.add(newPosition);
-                _lastTrackedPosition = newPosition;
-                _updatePolyline(); // Actualizar polyline roja
-              });
-            }
-          });
-        } else {
-          // Si no se movió más de 3 metros, solo actualizar el marcador sin añadir punto
-          _createVehicleIcon().then((carIcon) {
-            if (mounted) {
-              setState(() {
-                _markers.removeWhere((marker) => marker.markerId.value == 'selected_vehicle');
-                _markers.add(
-                  Marker(
-                    markerId: const MarkerId('selected_vehicle'),
-                    position: newPosition,
-                    icon: carIcon,
-                    onTap: () {
-                      _showVehicleInfoBottomSheet(
-                        newPosition,
-                        ultimaUbicacion.speed ?? device.speed,
-                        device.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                        DateFormat('HH:mm:ss').format(ultimaUbicacion.timestamp),
-                        imei: device.imei,
-                        device: device,
-                      );
-                    },
-                  ),
-                );
-              });
-            }
-          });
-        }
-      }
-    } catch (e) {
-      // Error silencioso: se reintentará en el siguiente ciclo
-    }
-  }
-  
-  Future<void> _loadHistorial(DeviceModel device, DateTime fechaDesde, DateTime fechaHasta) async {
-    _stopRealTimeMonitoring();
-    
-    setState(() {
-      _historialPoints.clear();
-      _historialSegments.clear();
-      _polylinePoints.clear();
-    });
-    
-    try {
-      final historial = await GpsService.getHistorial(
-        device.idDispositivo.toString(),
-        fechaDesde: fechaDesde,
-        fechaHasta: fechaHasta,
-      );
-      
-      if (historial.isNotEmpty && mounted) {
-        // Obtener primera y última ubicación del historial
-        final primeraUbicacion = historial.first;
-        final ultimaUbicacionHistorial = historial.last;
-        final primeraPosicion = primeraUbicacion.toLatLng();
-        final ultimaPosicion = ultimaUbicacionHistorial.toLatLng();
-        
-        setState(() {
-          // Convertir historial a LatLng y timestamps para filtrado de saltos
-          final historialPoints = <LatLng>[];
-          final historialTimestamps = <DateTime>[];
-          
-          for (var ubicacion in historial) {
-            historialPoints.add(ubicacion.toLatLng());
-            historialTimestamps.add(ubicacion.timestamp);
-          }
-          
-          // Filtrar saltos grandes (>500m) y crear segmentos continuos
-          // Los saltos grandes no se dibujan, evitando líneas que atraviesan edificios
-          final segments = _filterLargeJumps(historialPoints, historialTimestamps);
-          
-          // Guardar segmentos para crear polylines discontinuas
-          _historialSegments.clear();
-          _historialPoints.clear();
-          
-          // Interpolar cada segmento y guardarlo
-          for (var segment in segments) {
-            if (segment.length > 1) {
-              final smoothedSegment = _interpolatePoints(segment);
-              _historialSegments.add(smoothedSegment);
-              // También mantener en _historialPoints para compatibilidad con fitBounds
-              _historialPoints.addAll(smoothedSegment);
-            }
-          }
-          
-          // Crear iconos para marcadores
-          Future.wait([
-            _createStartIcon(), // Marcador verde de inicio
-            _createEndIcon(), // Marcador de banderín de fin
-            _createVehicleIcon(), // Marcador de vehículo
-          ]).then((icons) {
-            if (mounted) {
-              final startIcon = icons[0] as BitmapDescriptor;
-              final endIcon = icons[1] as BitmapDescriptor;
-              final vehicleIcon = icons[2] as BitmapDescriptor;
-              
-              setState(() {
-                // Limpiar marcadores anteriores (excepto mi ubicación)
-                _markers.removeWhere((marker) => 
-                  marker.markerId.value == 'selected_vehicle' ||
-                  marker.markerId.value == 'historial_start' ||
-                  marker.markerId.value == 'historial_end'
-                );
-                
-                // Marcador de inicio (verde) en el primer punto
-                _markers.add(
-                  Marker(
-                    markerId: const MarkerId('historial_start'),
-                    position: primeraPosicion,
-                    icon: startIcon,
-                    infoWindow: InfoWindow(
-                      title: 'Inicio del Recorrido',
-                      snippet: DateFormat('dd/MM/yyyy HH:mm').format(primeraUbicacion.timestamp),
-                    ),
-                  ),
-                );
-                
-                // Marcador de fin (banderín) en el último punto
-                _markers.add(
-                  Marker(
-                    markerId: const MarkerId('historial_end'),
-                    position: ultimaPosicion,
-                    icon: endIcon,
-                    infoWindow: InfoWindow(
-                      title: 'Fin del Recorrido',
-                      snippet: DateFormat('dd/MM/yyyy HH:mm').format(ultimaUbicacionHistorial.timestamp),
-                    ),
-                  ),
-                );
-                
-                // Marcador del vehículo en la última posición
-                _markers.add(
-                  Marker(
-                    markerId: const MarkerId('selected_vehicle'),
-                    position: ultimaPosicion,
-                    icon: vehicleIcon,
-                    onTap: () {
-                      _showVehicleInfoBottomSheet(
-                        ultimaPosicion,
-                        ultimaUbicacionHistorial.speed ?? device.speed,
-                        device.status == DeviceStatus.online ? 'En Movimiento' : 'Detenido',
-                        DateFormat('HH:mm:ss').format(ultimaUbicacionHistorial.timestamp),
-                        imei: device.imei,
-                        device: device,
-                      );
-                    },
-                  ),
-                );
-              });
-            }
-          });
-          
-          // Actualizar polyline con historial (azul) - con interpolación
-          _updatePolyline();
-        });
-        
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _fitBoundsToRoute();
-        });
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No se encontraron datos para el rango de fechas seleccionado'),
-              backgroundColor: Colors.orange,
-              duration: Duration(seconds: 3),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error cargando historial: ${e.toString()}'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
-    }
-  }
-  
-  /// Ajusta la cámara para mostrar toda la ruta (fitBounds)
-  void _fitBoundsToRoute() {
-    if (_mapController == null) return;
-    
-    // Combinar puntos de hoy e historial
-    final allPoints = <LatLng>[..._polylinePoints, ..._historialPoints];
-    
-    if (allPoints.isEmpty) return;
-    
-    // Calcular bounds
-    double minLat = allPoints.first.latitude;
-    double maxLat = allPoints.first.latitude;
-    double minLng = allPoints.first.longitude;
-    double maxLng = allPoints.first.longitude;
-    
-    for (var point in allPoints) {
-      minLat = math.min(minLat, point.latitude);
-      maxLat = math.max(maxLat, point.latitude);
-      minLng = math.min(minLng, point.longitude);
-      maxLng = math.max(maxLng, point.longitude);
-    }
-    
-    // Crear bounds con padding
-    final bounds = LatLngBounds(
-      southwest: LatLng(minLat, minLng),
-      northeast: LatLng(maxLat, maxLng),
-    );
-    
-    // Aplicar fitBounds con padding
-    _mapController!.animateCamera(
-      CameraUpdate.newLatLngBounds(bounds, 50.0), // 50px de padding para mejor integración con calles
-    );
-  }
-  
 }

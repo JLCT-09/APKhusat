@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/providers/auth_provider.dart';
-import '../../domain/models/user.dart';
+import '../../main.dart' show pendingDeviceIdFromNotification;
 import 'map_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -15,6 +15,16 @@ class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _usuarioController = TextEditingController();
   final _passwordController = TextEditingController();
+  String? _pendingDeviceIdFromNotification; // ID pendiente de notificación
+
+  @override
+  void initState() {
+    super.initState();
+    // Verificar si hay un ID pendiente proveniente de las notificaciones
+    _pendingDeviceIdFromNotification = pendingDeviceIdFromNotification;
+    // Limpiar la variable global después de leerla
+    pendingDeviceIdFromNotification = null;
+  }
 
   @override
   void dispose() {
@@ -54,15 +64,30 @@ class _LoginScreenState extends State<LoginScreen> {
       if (success && mounted) {
         final user = authProvider.user;
         if (user != null) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(
-              builder: (context) => MapScreen(userRole: user.role),
-            ),
-          );
+          // Si hay deviceId pendiente de notificación, navegar al Monitor con ese ID
+          if (_pendingDeviceIdFromNotification != null) {
+            final deviceId = _pendingDeviceIdFromNotification;
+            _pendingDeviceIdFromNotification = null; // Limpiar después de usar
+            
+            // Navegar al Monitor usando la ruta nombrada con el deviceId como argumento
+            Navigator.of(context).pushReplacementNamed(
+              '/monitor',
+              arguments: deviceId,
+            );
+          } else {
+            // Si no hay ID pendiente, navegar normalmente al MapScreen
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(
+                builder: (context) => MapScreen(
+                  userRole: user.role,
+                ),
+              ),
+            );
+          }
         }
       } else if (mounted) {
         // Mostrar error de comunicación con código
-        String mensajeError = authProvider.errorMessage ?? 'Error de comunicación con Husat';
+        String mensajeError = authProvider.errorMessage ?? 'Credenciales Incorrectas';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(mensajeError),
