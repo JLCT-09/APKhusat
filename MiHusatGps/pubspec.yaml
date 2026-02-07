@@ -1,0 +1,80 @@
+name: husat365
+description: Aplicación GPS para Husat con Clean Architecture
+publish_to: 'none'
+version: 1.0.0+6
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  provider: ^6.1.5+1
+  google_fonts: any
+  http: ^1.6.0
+  google_maps_flutter: ^2.5.3
+  location: ^5.0.3
+  flutter_local_notifications: ^18.0.1
+  geolocator: ^12.0.0
+  flutter_background_service: ^5.1.0
+  intl: ^0.20.2
+  shared_preferences: ^2.2.2
+  url_launcher: ^6.2.5
+  geocoding: ^3.0.0
+  custom_info_window: ^1.0.1
+  permission_handler: ^11.3.1
+  share_plus: ^10.1.2
+  image_picker: ^1.1.2
+  sqflite: ^2.3.0
+  path: ^1.8.3
+  font_awesome_flutter: ^10.7.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/Logo_apk.png
+    - assets/images/LogoCarga.png
+    - assets/images/LogoLogin.png
+    - assets/images/carro_verde.png
+    - assets/images/carro_azul.png
+    - assets/images/carro_plomo.png
+    - assets/images/soporte_avatar.png
+    # Iconos Laterales (para lista de dispositivos)
+    - assets/Iconos/Iconos/Lateral/Amarillo/
+    - assets/Iconos/Iconos/Lateral/Azul/
+    - assets/Iconos/Iconos/Lateral/Verde/
+    - assets/Iconos/Iconos/Lateral/Rojo/
+    - assets/Iconos/Iconos/Lateral/Offline/
+    - assets/Iconos/Iconos/Lateral/Gris/
+    # Iconos Arriba (para mapa/monitor)
+    - assets/Iconos/Iconos/Arriba/Amarillo/
+    - assets/Iconos/Iconos/Arriba/Azul/
+    - assets/Iconos/Iconos/Arriba/Verde/
+    - assets/Iconos/Iconos/Arriba/Rojo/
+    - assets/Iconos/Iconos/Arriba/Offline/
+
+flutter_launcher_icons:
+  android: true
+  ios: false  # Desactivado porque la estructura de iOS no está configurada
+  image_path: "assets/images/Logo_apk.png"
+  adaptive_icon_background: "#EF1A2D"  # Color rojo corporativo de la empresa
+  adaptive_icon_foreground: "assets/images/Logo_apk.png"
+
+# Splash nativo desactivado - usando splash personalizado en Flutter
+# flutter_native_splash:
+#   color: "#FFFFFF"
+#   image: "assets/images/logo.png"
+#   android: true
+#   ios: false
+#   android_12:
+#     color: "#FFFFFF"
+#     image: "assets/images/logo.png"

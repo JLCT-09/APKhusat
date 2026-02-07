@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Drawable que reduce el logo al 60% del tamaño original -->
+<!-- Padding de 25% en cada lado para que el logo quepa perfectamente en el área segura -->
+<!-- El área segura de Android es aproximadamente el 66% del icono, así que con 25% de padding -->
+<!-- el logo ocupará solo el 50% del área total, asegurando que se vea completo sin recortes -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_launcher_foreground"
+    android:insetLeft="25%"
+    android:insetTop="25%"
+    android:insetRight="25%"
+    android:insetBottom="25%">
+</inset>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Versión optimizada: el logo se reduce significativamente para que quepa bien -->
+<!-- Padding de 20% en cada lado reduce el logo al 60% del tamaño original -->
+<!-- Esto asegura que el logo se vea completo, centrado y con un tamaño apropiado en el área segura -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_launcher_foreground"
+    android:insetLeft="20%"
+    android:insetTop="20%"
+    android:insetRight="20%"
+    android:insetBottom="20%">
+</inset>
