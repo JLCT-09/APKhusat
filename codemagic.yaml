@@ -6,7 +6,14 @@ workflows:
     scripts:
       - name: Get dependencies
         script: flutter packages pub get
+      - name: Install Pods
+        script: |
+          cd ios
+          rm -rf Pods
+          rm -f Podfile.lock
+          pod install --repo-update
       - name: Build IPA
-        script: flutter build ipa --release --no-codesign
+        script: |
+          flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
