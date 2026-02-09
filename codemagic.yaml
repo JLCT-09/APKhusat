@@ -1,7 +1,15 @@
 workflows:
-  my-workflow:
-    name: Build APK
+  ios-build:
+    name: Build iOS IPA
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
     scripts:
-      - flutter build apk --release
+      - name: Get dependencies
+        script: flutter packages pub get
+      - name: Build iOS IPA
+        script: flutter build ipa --release --no-codesign
     artifacts:
-      - build/app/outputs/flutter-apk/*.apk
+      - build/ios/ipa/*.ipa
