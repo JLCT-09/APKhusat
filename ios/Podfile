@@ -1,8 +1,13 @@
+# 1. ESTAS SON LAS DOS LÍNEAS CLAVE:
+target_ios_revision = File.join(File.dirname(File.realpath(__FILE__)), '..', '.flutter-plugins-dependencies')
+load File.join(File.dirname(File.realpath(__FILE__)), '..', '..', 'flutter', 'packages', 'flutter_tools', 'bin', 'xcode_backend.rb')
+
 platform :ios, '14.0'
 
 target 'Runner' do
   use_frameworks!
   use_modular_headers!
 
+  # 2. Esto ahora sí funcionará porque cargamos las líneas de arriba
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
