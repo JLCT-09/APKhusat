@@ -1,7 +1,11 @@
-# Esta línea detecta automáticamente la ruta de Flutter en la máquina de Codemagic
-flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+source 'https://github.com/CocoaPods/Specs.git'
 
 platform :ios, '14.0'
+
+install! 'cocoapods', :deterministic_uuids => false
+
+# ESTA LÍNEA ES EL MOTOR QUE FALTA
+load File.join(File.dirname(File.realpath(__FILE__)), '..', '.flutter-plugins-dependencies')
 
 target 'Runner' do
   use_frameworks!
@@ -10,7 +14,6 @@ target 'Runner' do
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
 
-# Esto ayuda a que los plugins se enlacen correctamente
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
