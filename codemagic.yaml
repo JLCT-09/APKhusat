@@ -1,15 +1,12 @@
 workflows:
-  ios-build:
-    name: Build iOS IPA
-    instance_type: mac_mini_m1
+  ios-workflow:
+    name: Crear IPA para iOS
+    instance_type: mac_mini_m2
     max_build_duration: 60
-    environment:
-      flutter: stable
-      xcode: latest
     scripts:
-      - name: Get dependencies
+      - name: Obtener dependencias
         script: flutter packages pub get
-      - name: Build iOS IPA
+      - name: Construir IPA
         script: flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
