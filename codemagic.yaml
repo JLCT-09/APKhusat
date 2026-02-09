@@ -8,9 +8,8 @@ workflows:
         script: flutter packages pub get
       - name: Install Pods
         script: |
+          flutter precache --ios
           cd ios
-          rm -rf Pods
-          rm -f Podfile.lock
           pod install --repo-update
       - name: Build IPA
         script: |
