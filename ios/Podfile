@@ -1,10 +1,10 @@
 platform :ios, '14.0'
 
 target 'Runner' do
-  use_frameworks!
+  use_frameworks! # <--- ESTA LÍNEA ES OBLIGATORIA
   use_modular_headers!
 
-  # En lugar de cargar archivos externos, usamos la configuración básica
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
 
 post_install do |installer|
@@ -15,3 +15,4 @@ post_install do |installer|
     end
   end
 end
+
