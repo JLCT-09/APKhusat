@@ -10,20 +10,21 @@ workflows:
           flutter precache --ios
       - name: Install Pods
         script: |
+          # 1. Generamos la configuración necesaria ANTES de instalar pods
+          flutter build ios --config-only --no-codesign
+          
+          # 2. Entramos a la carpeta de iOS y limpiamos rastros viejos
           cd ios
-          # Limpieza total de instalaciones previas
           rm -rf Pods
           rm -f Podfile.lock
           pod deintegrate
+          
+          # 3. Instalamos las dependencias nativas
           pod install --repo-update
       - name: Build IPA
         script: |
-          # Limpiamos el proyecto de Flutter antes de la compilación final
-          flutter clean
-          flutter packages pub get
-          # Forzamos la regeneración del archivo que fallaba
-          flutter build ios --config-only --no-codesign
-          # Compilación final
+          # Construimos el archivo final (IPA)
+          # No usamos 'flutter clean' aquí para mantener la configuración del paso anterior
           flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
