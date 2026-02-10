@@ -11,16 +11,19 @@ workflows:
       - name: Install Pods
         script: |
           cd ios
-          # Limpiamos rastros de instalaciones previas
+          # Limpieza total de instalaciones previas
           rm -rf Pods
-          rm -rf ~/Library/Developer/Xcode/DerivedData/*
+          rm -f Podfile.lock
           pod deintegrate
           pod install --repo-update
       - name: Build IPA
         script: |
-          # Limpiamos el build de flutter antes de compilar el IPA
+          # Limpiamos el proyecto de Flutter antes de la compilación final
           flutter clean
           flutter packages pub get
+          # Forzamos la regeneración del archivo que fallaba
+          flutter build ios --config-only --no-codesign
+          # Compilación final
           flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
