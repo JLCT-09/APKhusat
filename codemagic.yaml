@@ -11,10 +11,16 @@ workflows:
       - name: Install Pods
         script: |
           cd ios
+          # Limpiamos rastros de instalaciones previas
+          rm -rf Pods
+          rm -rf ~/Library/Developer/Xcode/DerivedData/*
+          pod deintegrate
           pod install --repo-update
       - name: Build IPA
         script: |
-          # El secreto es el flag --no-codesign para evitar el error de certificados
+          # Limpiamos el build de flutter antes de compilar el IPA
+          flutter clean
+          flutter packages pub get
           flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
