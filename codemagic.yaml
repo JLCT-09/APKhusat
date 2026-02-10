@@ -8,23 +8,19 @@ workflows:
         script: |
           flutter packages pub get
           flutter precache --ios
-      - name: Install Pods
+      - name: Prepare iOS Environment
         script: |
-          # 1. Generamos la configuración necesaria ANTES de instalar pods
+          # Esto genera los archivos de enlace que te daban error de "cannot load"
           flutter build ios --config-only --no-codesign
-          
-          # 2. Entramos a la carpeta de iOS y limpiamos rastros viejos
           cd ios
+          # Limpiamos rastros de intentos fallidos anteriores
           rm -rf Pods
           rm -f Podfile.lock
           pod deintegrate
-          
-          # 3. Instalamos las dependencias nativas
           pod install --repo-update
       - name: Build IPA
         script: |
-          # Construimos el archivo final (IPA)
-          # No usamos 'flutter clean' aquí para mantener la configuración del paso anterior
+          # Al no usar 'flutter clean' aquí, mantenemos lo que preparamos arriba
           flutter build ipa --release --no-codesign
     artifacts:
       - build/ios/ipa/*.ipa
