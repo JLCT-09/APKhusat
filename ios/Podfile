@@ -1,21 +1,24 @@
 platform :ios, '14.0'
 
+# Carga correcta de Flutter
+require_relative '../flutter/packages/flutter_tools/bin/podhelper'
+
+flutter_ios_podfile_setup
+
 target 'Runner' do
-  use_frameworks! 
+  use_frameworks! :linkage => :static
   use_modular_headers!
 
-  # Permitimos que Flutter gestione los pods automáticamente de forma interna
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 end
 
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
     target.build_configurations.each do |config|
-      # Esto soluciona el error "Module not found"
-      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)', 'COCOAPODS=1']
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
       config.build_settings['ENABLE_BITCODE'] = 'NO'
-      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
     end
   end
 end
