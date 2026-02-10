@@ -1,7 +1,13 @@
 platform :ios, '14.0'
 
-# Detecta automáticamente Flutter
-require File.expand_path(File.join('..', 'Flutter', 'podhelper'), __FILE__)
+# Busca Flutter automáticamente
+flutter_root = ENV['FLUTTER_ROOT']
+if flutter_root.nil?
+  flutter_root = `which flutter`.strip
+  flutter_root = File.expand_path('../..', flutter_root)
+end
+
+require File.join(flutter_root, 'packages', 'flutter_tools', 'bin', 'podhelper')
 
 flutter_ios_podfile_setup
 
