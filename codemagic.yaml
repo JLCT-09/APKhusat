@@ -8,19 +8,20 @@ workflows:
         script: |
           flutter packages pub get
           flutter precache --ios
-      - name: Prepare iOS Environment
+      - name: Install Pods
         script: |
-          # Esto genera los archivos de enlace que te daban error de "cannot load"
+          # 1. Generamos el registro de plugins necesario para el módulo faltante
           flutter build ios --config-only --no-codesign
+          
+          # 2. Instalación limpia de Pods
           cd ios
-          # Limpiamos rastros de intentos fallidos anteriores
           rm -rf Pods
           rm -f Podfile.lock
           pod deintegrate
           pod install --repo-update
       - name: Build IPA
         script: |
-          # Al no usar 'flutter clean' aquí, mantenemos lo que preparamos arriba
-          flutter build ipa --release --no-codesign
+          # 3. Construcción directa (evitamos flutter clean para no borrar los Pods instalados)
+          flutter build ipa --release --no-codesign --verbose
     artifacts:
       - build/ios/ipa/*.ipa
