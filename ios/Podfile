@@ -1,7 +1,7 @@
 platform :ios, '14.0'
 
-# Carga correcta de Flutter
-require_relative '../flutter/packages/flutter_tools/bin/podhelper'
+# Detecta automáticamente Flutter
+require File.expand_path(File.join('..', 'Flutter', 'podhelper'), __FILE__)
 
 flutter_ios_podfile_setup
 
