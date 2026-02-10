@@ -5,10 +5,12 @@ workflows:
     max_build_duration: 60
     scripts:
       - name: Get dependencies
-        script: flutter packages pub get
+        script: |
+          flutter packages pub get
+          flutter precache --ios
+          flutter build ios --config-only
       - name: Install Pods
         script: |
-          flutter precache --ios
           cd ios
           pod install --repo-update
       - name: Build IPA
