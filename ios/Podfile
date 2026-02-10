@@ -1,7 +1,14 @@
+# INICIO DE LÍNEAS DE ENLACE (OBLIGATORIAS)
+target_ios_revision = File.join(File.dirname(File.realpath(__FILE__)), '..', '.flutter-plugins-dependencies')
+if File.exist?(target_ios_revision)
+  load File.join(File.dirname(File.realpath(__FILE__)), '..', '..', 'flutter', 'packages', 'flutter_tools', 'bin', 'xcode_backend.rb')
+end
+# FIN DE LÍNEAS DE ENLACE
+
 platform :ios, '14.0'
 
 target 'Runner' do
-  use_frameworks! # <--- ESTA LÍNEA ES OBLIGATORIA
+  use_frameworks!
   use_modular_headers!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
@@ -9,10 +16,10 @@ end
 
 post_install do |installer|
   installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target) # Añade esta línea también
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
       config.build_settings['ENABLE_BITCODE'] = 'NO'
     end
   end
 end
-
