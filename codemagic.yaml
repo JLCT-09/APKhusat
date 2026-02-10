@@ -3,10 +3,25 @@ workflows:
     name: Build iOS IPA
     instance_type: mac_mini_m2
     max_build_duration: 60
+
     scripts:
-      - name: Get dependencies
-        script: flutter packages pub get
+      - name: Clean & Get dependencies
+        script: |
+          flutter clean
+          flutter pub get
+          flutter precache --ios
+
+      - name: Install Pods
+        script: |
+          cd ios
+          rm -rf Pods Podfile.lock
+          pod deintegrate
+          pod install --repo-update
+          cd ..
+
       - name: Build IPA
-        script: flutter build ipa --release --no-codesign
+        script: |
+          flutter build ipa --release --no-codesign
+
     artifacts:
       - build/ios/ipa/*.ipa
