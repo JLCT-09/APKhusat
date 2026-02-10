@@ -3,25 +3,25 @@ workflows:
     name: Build iOS IPA
     instance_type: mac_mini_m2
     max_build_duration: 60
+
     scripts:
-      - name: Get dependencies
+      - name: Clean & Get dependencies
         script: |
-          flutter packages pub get
+          flutter clean
+          flutter pub get
           flutter precache --ios
+
       - name: Install Pods
         script: |
-          # 1. Generamos el registro de plugins necesario para el módulo faltante
-          flutter build ios --config-only --no-codesign
-          
-          # 2. Instalación limpia de Pods
           cd ios
-          rm -rf Pods
-          rm -f Podfile.lock
+          rm -rf Pods Podfile.lock
           pod deintegrate
           pod install --repo-update
+          cd ..
+
       - name: Build IPA
         script: |
-          # 3. Construcción directa (evitamos flutter clean para no borrar los Pods instalados)
-          flutter build ipa --release --no-codesign --verbose
+          flutter build ipa --release --no-codesign
+
     artifacts:
       - build/ios/ipa/*.ipa
