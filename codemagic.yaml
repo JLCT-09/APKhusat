@@ -13,11 +13,8 @@ workflows:
 
       - name: Install Pods
         script: |
-          cd ios
-          rm -rf Pods Podfile.lock
-          pod deintegrate
-          pod install --repo-update
-          cd ..
+          flutter pub get
+          flutter build ios --no-codesign
 
       - name: Build IPA
         script: |
